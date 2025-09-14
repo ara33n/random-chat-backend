@@ -15,10 +15,7 @@ app.get("/", (req, res) => {
 const server = http.createServer(app);
 const io = new IOServer(server, {
     cors: {
-        origin: [
-            "https://rafay-chat-frontend.vercel.app",
-            "http://localhost:4200",
-        ],
+        origin: ["https://strang-texx.vercel.app", "http://localhost:4200"],
         methods: ["GET", "POST"],
     },
 });
@@ -35,6 +32,11 @@ const topicsOf = new Map(); // ✅ socket.id -> topics array
 
 // ✅ Bad words list
 const badWords = ["fuck", "shit", "bitch", "sex", "asshole"];
+
+// ✅ Helper to send online count
+function broadcastOnlineCount() {
+    io.emit("online-count", { count: io.sockets.sockets.size });
+}
 
 function safePartner(id) {
     const pid = partnerOf.get(id);
@@ -114,6 +116,9 @@ function breakPair(socket, notifyEvent) {
 }
 
 io.on("connection", (socket) => {
+    // ✅ Broadcast new online count
+    broadcastOnlineCount();
+
     // ✅ Detect IP (proxy safe)
     const ip =
         socket.handshake.headers["x-forwarded-for"]?.split(",")[0] ||
@@ -210,6 +215,9 @@ io.on("connection", (socket) => {
         modeOf.delete(socket.id);
         countryOf.delete(socket.id);
         topicsOf.delete(socket.id);
+
+        // ✅ Broadcast updated online count
+        broadcastOnlineCount();
     });
 });
 
