@@ -33,9 +33,25 @@ const topicsOf = new Map(); // ✅ socket.id -> topics array
 // ✅ Bad words list
 const badWords = ["fuck", "shit", "bitch", "sex", "asshole"];
 
+// ✅ Ban maps
+const badWordCount = new Map(); // ip -> count
+const bannedIPs = new Map(); // ip -> banExpiry timestamp
+
 // ✅ Helper to send online count
 function broadcastOnlineCount() {
     io.emit("online-count", { count: io.sockets.sockets.size });
+}
+
+// ✅ Ban check
+function isBanned(ip) {
+    const expiry = bannedIPs.get(ip);
+    if (!expiry) return false;
+    if (Date.now() > expiry) {
+        bannedIPs.delete(ip);
+        badWordCount.delete(ip);
+        return false;
+    }
+    return true;
 }
 
 function safePartner(id) {
@@ -133,6 +149,15 @@ io.on("connection", (socket) => {
 
     // ✅ Partner find with topics
     socket.on("find-partner", ({ mode, topics }) => {
+        // ✅ Check ban
+        if (isBanned(ip)) {
+            socket.emit("banned", {
+                reason: "You are banned for inappropriate words.",
+                remaining: Math.ceil((bannedIPs.get(ip) - Date.now()) / 1000),
+            });
+            return;
+        }
+
         if (mode !== "video" && mode !== "text") mode = "video";
         breakPair(socket, null);
         enqueue(socket, mode);
@@ -156,13 +181,34 @@ io.on("connection", (socket) => {
         if (partner) partner.emit("signal", payload);
     });
 
-    // ✅ Messages (with bad word check)
+    // ✅ Messages (with bad word check + ban)
     socket.on("message", (msg) => {
+        // Ban check
+        if (isBanned(ip)) {
+            socket.emit("banned", {
+                reason: "You are banned for inappropriate words.",
+                remaining: Math.ceil((bannedIPs.get(ip) - Date.now()) / 1000),
+            });
+            return;
+        }
+
         const lowerMsg = msg.toLowerCase();
         const partner = safePartner(socket.id);
 
         if (badWords.some((bw) => lowerMsg.includes(bw))) {
-            socket.emit("bad-word-warning", { text: msg });
+            const count = (badWordCount.get(ip) || 0) + 1;
+            badWordCount.set(ip, count);
+
+            socket.emit("bad-word-warning", { text: msg, strikes: count });
+
+            if (count >= 4) {
+                bannedIPs.set(ip, Date.now() + 60 * 1000); // ban 1 min
+                socket.emit("banned", {
+                    reason: "You are banned for repeated inappropriate words.",
+                    remaining: 60,
+                });
+            }
+
             if (partner) partner.emit("message", msg);
             return;
         }
@@ -182,6 +228,14 @@ io.on("connection", (socket) => {
 
     // ✅ Skip
     socket.on("skip", () => {
+        if (isBanned(ip)) {
+            socket.emit("banned", {
+                reason: "You are banned for inappropriate words.",
+                remaining: Math.ceil((bannedIPs.get(ip) - Date.now()) / 1000),
+            });
+            return;
+        }
+
         const mode = modeOf.get(socket.id) || "video";
         breakPair(socket, "partner-left");
         enqueue(socket, mode);
@@ -207,7 +261,7 @@ io.on("connection", (socket) => {
 
         modeOf.delete(myId);
         countryOf.delete(myId);
-        topicsOf.delete(myId); // ✅ clean topics
+        topicsOf.delete(myId);
     });
 
     socket.on("disconnect", () => {
