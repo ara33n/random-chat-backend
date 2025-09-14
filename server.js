@@ -6,6 +6,8 @@ import geoip from "geoip-lite";
 
 const app = express();
 app.use(cors());
+
+// ✅ Root route
 app.get("/", (req, res) => {
     res.json({ ok: true, message: "Random Chat Signaling Server running." });
 });
@@ -23,7 +25,7 @@ const partnerOf = new Map();
 const modeOf = new Map();
 const countryOf = new Map();
 const startedAt = new Map();
-const topicsOf = new Map(); // ✅ New map: socket.id -> topics array
+const topicsOf = new Map(); // ✅ socket.id -> topics array
 
 // ✅ Bad words list
 const badWords = ["fuck", "shit", "bitch", "sex", "asshole"];
@@ -46,12 +48,6 @@ function dequeue(mode, id) {
     if (idx >= 0) list.splice(idx, 1);
 }
 
-function haveCommonTopic(aId, bId) {
-    const aTopics = topicsOf.get(aId) || [];
-    const bTopics = topicsOf.get(bId) || [];
-    return aTopics.some((t) => bTopics.includes(t));
-}
-
 function tryMatch(mode) {
     const list = queues[mode];
     while (list.length >= 2) {
@@ -63,15 +59,17 @@ function tryMatch(mode) {
 
         partnerOf.set(aId, bId);
         partnerOf.set(bId, aId);
+        startedAt.set(aId, Date.now());
+        startedAt.set(bId, Date.now());
 
         const initiator = Math.random() < 0.5 ? aId : bId;
 
         const aCountry = countryOf.get(aId) || "UN";
         const bCountry = countryOf.get(bId) || "UN";
 
-        // 🔹 Topics match check
-        const aTopics = a.handshake.auth?.topics || [];
-        const bTopics = b.handshake.auth?.topics || [];
+        // ✅ Topics match check from topicsOf map
+        const aTopics = topicsOf.get(aId) || [];
+        const bTopics = topicsOf.get(bId) || [];
         const matchedTopics = aTopics.filter((t) => bTopics.includes(t));
 
         // ✅ Send partner info with country + matched topics
@@ -90,34 +88,6 @@ function tryMatch(mode) {
             matchedTopics,
         });
     }
-}
-
-function connectPair(aId, bId, mode) {
-    const a = io.sockets.sockets.get(aId);
-    const b = io.sockets.sockets.get(bId);
-    if (!a || !b) return;
-
-    partnerOf.set(aId, bId);
-    partnerOf.set(bId, aId);
-    startedAt.set(aId, Date.now());
-    startedAt.set(bId, Date.now());
-
-    const initiator = Math.random() < 0.5 ? aId : bId;
-    const aCountry = countryOf.get(aId) || "UN";
-    const bCountry = countryOf.get(bId) || "UN";
-
-    a.emit("partner-found", {
-        partnerId: bId,
-        initiator: initiator === aId,
-        mode,
-        country: bCountry,
-    });
-    b.emit("partner-found", {
-        partnerId: aId,
-        initiator: initiator === bId,
-        mode,
-        country: aCountry,
-    });
 }
 
 function breakPair(socket, notifyEvent) {
@@ -239,5 +209,5 @@ io.on("connection", (socket) => {
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
-    console.log("Signaling server listening on", PORT);
+    console.log("✅ Signaling server listening on", PORT);
 });
