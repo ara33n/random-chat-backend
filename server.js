@@ -14,7 +14,13 @@ app.get("/", (req, res) => {
 
 const server = http.createServer(app);
 const io = new IOServer(server, {
-    cors: { origin: "*", methods: ["GET", "POST"] },
+    cors: {
+        origin: [
+            "https://rafay-chat-frontend.vercel.app",
+            "http://localhost:4200",
+        ],
+        methods: ["GET", "POST"],
+    },
 });
 
 // Queues
