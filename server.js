@@ -15,7 +15,11 @@ app.get("/", (req, res) => {
 const server = http.createServer(app);
 const io = new IOServer(server, {
     cors: {
-        origin: ["https://loop-chatx.vercel.app", "http://localhost:4200"],
+        origin: [
+            "https://loop-chatx.vercel.app",
+            "http://localhost:4200",
+            "https://strangtexx.onrender.com",
+        ],
         methods: ["GET", "POST"],
     },
 });
