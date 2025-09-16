@@ -329,5 +329,5 @@ io.on("connection", (socket) => {
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
     console.log("✅ Signaling server listening on", PORT);
-    console.log("🚀 Current App Version:", appVersion, filter.loadDictionary());
+    console.log("🚀 Current App Version:", appVersion);
 });
