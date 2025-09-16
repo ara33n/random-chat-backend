@@ -324,6 +324,24 @@ io.on("connection", (socket) => {
 
         console.log("🚫 User banned manually (nudity/NSFW):", ip);
     });
+
+    // ✅ NSFW report from frontend
+    socket.on("report-nsfw", (data) => {
+        const ip =
+            socket.handshake.headers["x-forwarded-for"]?.split(",")[0] ||
+            socket.handshake.address;
+
+        const duration = 60 * 1000; // 1 min
+        bannedIPs.set(ip, Date.now() + duration);
+
+        socket.emit("banned", {
+            reason: data?.reason || "Nudity detected",
+            remaining: Math.ceil(duration / 1000),
+            snapshot: data?.snapshot || null, // 👈 send back snapshot
+        });
+
+        console.log("🚫 NSFW ban:", ip);
+    });
 });
 
 const PORT = process.env.PORT || 3001;
