@@ -5,7 +5,10 @@
     "main": "server.js",
     "scripts": {
         "start": "node server.js",
-        "dev": "node server.js"
+        "dev": "node server.js",
+        "version:patch": "npm version patch && npm run start",
+        "version:minor": "npm version minor && npm run start",
+        "version:major": "npm version major && npm run start"
     },
     "dependencies": {
         "cors": "^2.8.5",

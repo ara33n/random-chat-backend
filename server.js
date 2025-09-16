@@ -3,21 +3,31 @@ import http from "http";
 import cors from "cors";
 import { Server as IOServer } from "socket.io";
 import geoip from "geoip-lite";
+import fs from "fs";
+import path from "path";
 
 const app = express();
 app.use(cors());
 
-// ✅ Build version auto (timestamp ya git hash)
-const BUILD_VERSION = process.env.BUILD_VERSION || Date.now().toString();
+// ✅ Version read from package.json
+const pkgPath = path.join(process.cwd(), "package.json");
+let appVersion = "1.0.0";
+try {
+    const raw = fs.readFileSync(pkgPath, "utf-8");
+    const parsed = JSON.parse(raw);
+    appVersion = parsed.version;
+} catch (err) {
+    console.warn("⚠️ Could not read package.json version, defaulting to 1.0.0");
+}
 
 // ✅ Root route
 app.get("/", (req, res) => {
     res.json({ ok: true, message: "Random Chat Signaling Server running." });
 });
 
-// ✅ Version route
+// ✅ Version route (frontend polls this)
 app.get("/version", (req, res) => {
-    res.json({ version: BUILD_VERSION });
+    res.json({ version: appVersion });
 });
 
 const server = http.createServer(app);
@@ -289,10 +299,6 @@ io.on("connection", (socket) => {
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
-    console.log(
-        "✅ Signaling server listening on",
-        PORT,
-        "Build:",
-        BUILD_VERSION
-    );
+    console.log("✅ Signaling server listening on", PORT);
+    console.log("🚀 Current App Version:", appVersion);
 });
