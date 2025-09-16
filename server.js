@@ -21,7 +21,7 @@ const banSchema = new mongoose.Schema({
     ip: { type: String, required: true },
     reason: { type: String, required: true },
     expiry: { type: Date, required: true },
-    snapshotPath: { type: String },
+    snapshotBase64: { type: String },
     createdAt: { type: Date, default: Date.now },
 });
 
@@ -204,9 +204,7 @@ io.on("connection", async (socket) => {
             remaining: Math.ceil(
                 (activeBan.expiry.getTime() - Date.now()) / 1000
             ),
-            snapshot: activeBan.snapshotPath
-                ? `/snapshots/${path.basename(activeBan.snapshotPath)}`
-                : null,
+            snapshot: activeBan.snapshotBase64 || null, // 👈 Base64 return
         });
         return; // ❌ Stop further processing
     }
@@ -346,16 +344,25 @@ io.on("connection", async (socket) => {
     });
 
     // ✅ Manual ban trigger
-    socket.on("banned", (data) => {
+    socket.on("banned", async (data) => {
         const duration = 10 * 60 * 1000;
-        bannedIPs.set(ip, Date.now() + duration);
+        const expiry = new Date(Date.now() + duration);
+
+        const banDoc = new Ban({
+            ip,
+            reason: data?.reason || "Inappropriate video content",
+            expiry,
+            snapshotBase64: data?.snapshot || null,
+        });
+        await banDoc.save();
 
         socket.emit("banned", {
-            reason: data?.reason || "Inappropriate video content",
+            reason: banDoc.reason,
             remaining: Math.ceil(duration / 1000),
+            snapshot: banDoc.snapshotBase64 || null,
         });
 
-        console.log("🚫 User banned manually (nudity/NSFW):", ip);
+        console.log("🚫 User banned manually:", ip);
     });
 
     // ✅ Snapshot folder ensure
@@ -365,40 +372,29 @@ io.on("connection", async (socket) => {
     // ✅ NSFW report
     socket.on("report-nsfw", async (data) => {
         try {
-            const duration = 60 * 1000;
+            const duration = 60 * 1000; // 1 min ban
             const expiry = new Date(Date.now() + duration);
 
-            let snapshotPath = null;
+            let snapshotBase64 = null;
             if (data?.snapshot) {
-                const base64Data = data.snapshot.replace(
-                    /^data:image\/\w+;base64,/,
-                    ""
-                );
-                const fileName = `ban_${Date.now()}_${ip.replace(
-                    /[:.]/g,
-                    "_"
-                )}.jpg`;
-                snapshotPath = path.join(SNAPSHOT_DIR, fileName);
-                fs.writeFileSync(snapshotPath, base64Data, "base64");
+                snapshotBase64 = data.snapshot; // 👈 Base64 direct store
             }
 
             const banDoc = new Ban({
                 ip,
                 reason: data?.reason || "Nudity detected",
                 expiry,
-                snapshotPath,
+                snapshotBase64, // 👈 store base64 instead of file path
             });
             await banDoc.save();
 
             socket.emit("banned", {
                 reason: banDoc.reason,
                 remaining: Math.ceil((expiry.getTime() - Date.now()) / 1000),
-                snapshot: snapshotPath
-                    ? `/snapshots/${path.basename(snapshotPath)}`
-                    : null,
+                snapshot: snapshotBase64 || null, // 👈 send base64 back to frontend
             });
 
-            console.log("🚫 NSFW ban saved:", banDoc);
+            console.log("🚫 NSFW ban saved:", banDoc._id);
         } catch (err) {
             console.error("❌ Ban save error:", err);
         }
