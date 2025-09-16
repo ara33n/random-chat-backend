@@ -5,13 +5,14 @@ import { Server as IOServer } from "socket.io";
 import geoip from "geoip-lite";
 import fs from "fs";
 import path from "path";
+import filter from "leo-profanity";
 
 const app = express();
 app.use(cors());
 
 // ✅ Version read from package.json
 const pkgPath = path.join(process.cwd(), "package.json");
-let appVersion = "1.0.0";
+let appVersion = "1.0.1";
 try {
     const raw = fs.readFileSync(pkgPath, "utf-8");
     const parsed = JSON.parse(raw);
@@ -63,6 +64,9 @@ const bannedIPs = new Map(); // ip -> banExpiry timestamp
 function broadcastOnlineCount() {
     io.emit("online-count", { count: io.sockets.sockets.size });
 }
+
+filter.loadDictionary(); // ✅ load default bad words
+filter.add(["sex", "nude", "xxx"]); // ✅ extra words if needed
 
 // ✅ Ban check
 function isBanned(ip) {
@@ -214,27 +218,33 @@ io.on("connection", (socket) => {
             return;
         }
 
-        const lowerMsg = msg.toLowerCase();
         const partner = safePartner(socket.id);
 
-        if (badWords.some((bw) => lowerMsg.includes(bw))) {
+        // ✅ Check for bad words with leo-profanity
+        if (filter.check(msg)) {
             const count = (badWordCount.get(ip) || 0) + 1;
             badWordCount.set(ip, count);
 
+            // ⚠️ Send warning
             socket.emit("bad-word-warning", { text: msg, strikes: count });
 
-            if (count >= 4) {
-                bannedIPs.set(ip, Date.now() + 60 * 1000); // ban 1 min
+            if (count >= 2) {
+                // ✅ do warning ke baad ban
+                const banTime = 60 * 1000; // 1 min
+                bannedIPs.set(ip, Date.now() + banTime);
+
                 socket.emit("banned", {
-                    reason: "You are banned for repeated inappropriate words.",
-                    remaining: 60,
+                    reason: "You are banned for inappropriate text.",
+                    remaining: Math.ceil(banTime / 1000),
                 });
+
+                return; // ❌ Don't forward to partner
             }
 
-            if (partner) partner.emit("message", msg);
-            return;
+            return; // ❌ Don't forward to partner
         }
 
+        // ✅ Clean message, forward to partner
         if (partner) partner.emit("message", msg);
     });
 
@@ -295,10 +305,29 @@ io.on("connection", (socket) => {
         // ✅ Broadcast updated online count
         broadcastOnlineCount();
     });
+
+    // ✅ Manual ban trigger (e.g., nudity detection from frontend)
+    socket.on("banned", (data) => {
+        const ip =
+            socket.handshake.headers["x-forwarded-for"]?.split(",")[0] ||
+            socket.handshake.address;
+
+        // default 10 minute ban
+        const duration = 10 * 60 * 1000;
+
+        bannedIPs.set(ip, Date.now() + duration);
+
+        socket.emit("banned", {
+            reason: data?.reason || "Inappropriate video content",
+            remaining: Math.ceil(duration / 1000),
+        });
+
+        console.log("🚫 User banned manually (nudity/NSFW):", ip);
+    });
 });
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
     console.log("✅ Signaling server listening on", PORT);
-    console.log("🚀 Current App Version:", appVersion);
+    console.log("🚀 Current App Version:", appVersion, filter.loadDictionary());
 });
