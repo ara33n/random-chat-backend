@@ -7,9 +7,17 @@ import geoip from "geoip-lite";
 const app = express();
 app.use(cors());
 
+// ✅ Build version auto (timestamp ya git hash)
+const BUILD_VERSION = process.env.BUILD_VERSION || Date.now().toString();
+
 // ✅ Root route
 app.get("/", (req, res) => {
     res.json({ ok: true, message: "Random Chat Signaling Server running." });
+});
+
+// ✅ Version route
+app.get("/version", (req, res) => {
+    res.json({ version: BUILD_VERSION });
 });
 
 const server = http.createServer(app);
@@ -281,5 +289,10 @@ io.on("connection", (socket) => {
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
-    console.log("✅ Signaling server listening on", PORT);
+    console.log(
+        "✅ Signaling server listening on",
+        PORT,
+        "Build:",
+        BUILD_VERSION
+    );
 });
