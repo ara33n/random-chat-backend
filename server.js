@@ -8,13 +8,13 @@ import path from "path";
 import filter from "leo-profanity";
 import mongoose from "mongoose";
 
+const app = express();
+app.use(cors());
 // ✅ MongoDB connect
 mongoose
     .connect(process.env.MONGO_URI || "mongodb://127.0.0.1:27017/chatapp")
     .then(() => console.log("✅ MongoDB connected"))
     .catch((err) => console.error("❌ MongoDB connect error:", err));
-const app = express();
-app.use(cors());
 
 // ✅ Ban Schema
 const banSchema = new mongoose.Schema({
@@ -64,14 +64,16 @@ app.get("/version", (req, res) => {
 
 const server = http.createServer(app);
 const io = new IOServer(server, {
-    cors: {
-        origin: [
-            "https://loop-chatx.vercel.app",
-            "http://localhost:4200",
-            "https://strangtexx.onrender.com",
-        ],
-        methods: ["GET", "POST"],
-    },
+    // cors: {
+    //     origin: [
+    //         "https://loop-chatx.vercel.app",
+    //         "http://localhost:4200",
+    //         "https://strangtexx.onrender.com",
+    //     ],
+    //     methods: ["GET", "POST"],
+    // },
+
+    cors: { origin: "*", methods: ["GET", "POST"] },
 });
 
 // Queues
