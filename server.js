@@ -6,9 +6,39 @@ import geoip from "geoip-lite";
 import fs from "fs";
 import path from "path";
 import filter from "leo-profanity";
+import mongoose from "mongoose";
 
 const app = express();
 app.use(cors());
+
+// ✅ MongoDB connect
+mongoose
+    .connect(process.env.MONGO_URI || "mongodb://localhost:27017/chatapp")
+    .then(() => console.log("✅ MongoDB connected"))
+    .catch((err) => console.error("❌ MongoDB error:", err));
+
+// ✅ Ban Schema
+const banSchema = new mongoose.Schema({
+    ip: String,
+    reason: String,
+    expiry: Date,
+    snapshotPath: String,
+    createdAt: { type: Date, default: Date.now },
+});
+
+const Ban = mongoose.model("Ban", banSchema);
+
+// ✅ Helper: check ban
+async function getActiveBan(ip) {
+    const ban = await Ban.findOne({ ip }).sort({ createdAt: -1 });
+    if (!ban) return null;
+
+    if (Date.now() > ban.expiry.getTime()) {
+        // expired → keep record, but not active
+        return null;
+    }
+    return ban;
+}
 
 // ✅ Version read from package.json
 const pkgPath = path.join(process.cwd(), "package.json");
@@ -325,22 +355,66 @@ io.on("connection", (socket) => {
         console.log("🚫 User banned manually (nudity/NSFW):", ip);
     });
 
-    // ✅ NSFW report from frontend
-    socket.on("report-nsfw", (data) => {
+    // ✅ NSFW report
+    socket.on("report-nsfw", async (data) => {
         const ip =
             socket.handshake.headers["x-forwarded-for"]?.split(",")[0] ||
             socket.handshake.address;
-
         const duration = 60 * 1000; // 1 min
-        bannedIPs.set(ip, Date.now() + duration);
+        const expiry = new Date(Date.now() + duration);
+
+        let snapshotPath = null;
+        if (data?.snapshot) {
+            const base64Data = data.snapshot.replace(
+                /^data:image\/\w+;base64,/,
+                ""
+            );
+            const fileName = `ban_${Date.now()}_${ip.replace(
+                /[:.]/g,
+                "_"
+            )}.jpg`;
+            snapshotPath = path.join(SNAPSHOT_DIR, fileName);
+            fs.writeFileSync(snapshotPath, base64Data, "base64");
+        }
+
+        // ✅ Save ban to MongoDB
+        const banDoc = new Ban({
+            ip,
+            reason: data?.reason || "Nudity detected",
+            expiry,
+            snapshotPath,
+        });
+        await banDoc.save();
 
         socket.emit("banned", {
-            reason: data?.reason || "Nudity detected",
-            remaining: Math.ceil(duration / 1000),
-            snapshot: data?.snapshot || null, // 👈 send back snapshot
+            reason: banDoc.reason,
+            remaining: Math.ceil((expiry.getTime() - Date.now()) / 1000),
+            snapshot: snapshotPath
+                ? `/snapshots/${path.basename(snapshotPath)}`
+                : null,
         });
 
-        console.log("🚫 NSFW ban:", ip);
+        console.log("🚫 NSFW ban saved in DB:", banDoc);
+    });
+
+    // ✅ On connection check if banned
+    io.on("connection", async (socket) => {
+        const ip =
+            socket.handshake.headers["x-forwarded-for"]?.split(",")[0] ||
+            socket.handshake.address;
+        const activeBan = await getActiveBan(ip);
+        if (activeBan) {
+            socket.emit("banned", {
+                reason: activeBan.reason,
+                remaining: Math.ceil(
+                    (activeBan.expiry.getTime() - Date.now()) / 1000
+                ),
+                snapshot: activeBan.snapshotPath
+                    ? `/snapshots/${path.basename(activeBan.snapshotPath)}`
+                    : null,
+            });
+            return; // stop further join
+        }
     });
 });
 
