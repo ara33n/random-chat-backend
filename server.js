@@ -6,9 +6,42 @@ import geoip from "geoip-lite";
 import fs from "fs";
 import path from "path";
 import filter from "leo-profanity";
+import mongoose from "mongoose";
 
 const app = express();
 app.use(cors());
+
+// ✅ MongoDB connect
+mongoose
+    .connect(process.env.MONGO_URI || "mongodb://127.0.0.1:27017/chatapp", {
+        useNewUrlParser: true,
+        useUnifiedTopology: true,
+    })
+    .then(() => console.log("✅ MongoDB connected"))
+    .catch((err) => console.error("❌ MongoDB connect error:", err));
+
+// ✅ Ban Schema
+const banSchema = new mongoose.Schema({
+    ip: { type: String, required: true },
+    reason: { type: String, required: true },
+    expiry: { type: Date, required: true },
+    snapshotPath: { type: String },
+    createdAt: { type: Date, default: Date.now },
+});
+
+const Ban = mongoose.model("Ban", banSchema);
+
+// ✅ Helper: check ban
+async function getActiveBan(ip) {
+    const ban = await Ban.findOne({ ip }).sort({ createdAt: -1 });
+    if (!ban) return null;
+
+    if (Date.now() > ban.expiry.getTime()) {
+        // expired → keep record, but not active
+        return null;
+    }
+    return ban;
+}
 
 // ✅ Version read from package.json
 const pkgPath = path.join(process.cwd(), "package.json");
@@ -20,6 +53,8 @@ try {
 } catch (err) {
     console.warn("⚠️ Could not read package.json version, defaulting to 1.0.0");
 }
+
+app.use("/snapshots", express.static(path.join(process.cwd(), "snapshots")));
 
 // ✅ Root route
 app.get("/", (req, res) => {
@@ -157,25 +192,39 @@ function breakPair(socket, notifyEvent) {
     if (mode) dequeue(mode, socket.id);
 }
 
-io.on("connection", (socket) => {
-    // ✅ Broadcast new online count
-    broadcastOnlineCount();
-
+io.on("connection", async (socket) => {
     // ✅ Detect IP (proxy safe)
     const ip =
         socket.handshake.headers["x-forwarded-for"]?.split(",")[0] ||
         socket.handshake.address;
 
+    // ✅ Check active ban from DB on connection
+    const activeBan = await getActiveBan(ip);
+    if (activeBan) {
+        socket.emit("banned", {
+            reason: activeBan.reason,
+            remaining: Math.ceil(
+                (activeBan.expiry.getTime() - Date.now()) / 1000
+            ),
+            snapshot: activeBan.snapshotPath
+                ? `/snapshots/${path.basename(activeBan.snapshotPath)}`
+                : null,
+        });
+        return; // ❌ Stop further processing
+    }
+
+    // ✅ Broadcast new online count
+    broadcastOnlineCount();
+
+    // ✅ Geo detect
     const geo = geoip.lookup(ip) || {};
     const country = geo?.country || "UN";
 
     countryOf.set(socket.id, country);
-
     socket.emit("your-info", { ip, geo });
 
     // ✅ Partner find with topics
     socket.on("find-partner", ({ mode, topics }) => {
-        // ✅ Check ban
         if (isBanned(ip)) {
             socket.emit("banned", {
                 reason: "You are banned for inappropriate words.",
@@ -188,7 +237,7 @@ io.on("connection", (socket) => {
         breakPair(socket, null);
         enqueue(socket, mode);
 
-        // Save topics (normalize lowercase)
+        // Save topics
         if (Array.isArray(topics)) {
             topicsOf.set(
                 socket.id,
@@ -209,7 +258,6 @@ io.on("connection", (socket) => {
 
     // ✅ Messages (with bad word check + ban)
     socket.on("message", (msg) => {
-        // Ban check
         if (isBanned(ip)) {
             socket.emit("banned", {
                 reason: "You are banned for inappropriate words.",
@@ -220,17 +268,14 @@ io.on("connection", (socket) => {
 
         const partner = safePartner(socket.id);
 
-        // ✅ Check for bad words with leo-profanity
         if (filter.check(msg)) {
             const count = (badWordCount.get(ip) || 0) + 1;
             badWordCount.set(ip, count);
 
-            // ⚠️ Send warning
             socket.emit("bad-word-warning", { text: msg, strikes: count });
 
             if (count >= 2) {
-                // ✅ do warning ke baad ban
-                const banTime = 60 * 1000; // 1 min
+                const banTime = 60 * 1000;
                 bannedIPs.set(ip, Date.now() + banTime);
 
                 socket.emit("banned", {
@@ -238,13 +283,11 @@ io.on("connection", (socket) => {
                     remaining: Math.ceil(banTime / 1000),
                 });
 
-                return; // ❌ Don't forward to partner
+                return;
             }
-
-            return; // ❌ Don't forward to partner
+            return;
         }
 
-        // ✅ Clean message, forward to partner
         if (partner) partner.emit("message", msg);
     });
 
@@ -301,20 +344,12 @@ io.on("connection", (socket) => {
         modeOf.delete(socket.id);
         countryOf.delete(socket.id);
         topicsOf.delete(socket.id);
-
-        // ✅ Broadcast updated online count
         broadcastOnlineCount();
     });
 
-    // ✅ Manual ban trigger (e.g., nudity detection from frontend)
+    // ✅ Manual ban trigger
     socket.on("banned", (data) => {
-        const ip =
-            socket.handshake.headers["x-forwarded-for"]?.split(",")[0] ||
-            socket.handshake.address;
-
-        // default 10 minute ban
         const duration = 10 * 60 * 1000;
-
         bannedIPs.set(ip, Date.now() + duration);
 
         socket.emit("banned", {
@@ -325,22 +360,50 @@ io.on("connection", (socket) => {
         console.log("🚫 User banned manually (nudity/NSFW):", ip);
     });
 
-    // ✅ NSFW report from frontend
-    socket.on("report-nsfw", (data) => {
-        const ip =
-            socket.handshake.headers["x-forwarded-for"]?.split(",")[0] ||
-            socket.handshake.address;
+    // ✅ Snapshot folder ensure
+    const SNAPSHOT_DIR = path.join(process.cwd(), "snapshots");
+    if (!fs.existsSync(SNAPSHOT_DIR)) fs.mkdirSync(SNAPSHOT_DIR);
 
-        const duration = 60 * 1000; // 1 min
-        bannedIPs.set(ip, Date.now() + duration);
+    // ✅ NSFW report
+    socket.on("report-nsfw", async (data) => {
+        try {
+            const duration = 60 * 1000;
+            const expiry = new Date(Date.now() + duration);
 
-        socket.emit("banned", {
-            reason: data?.reason || "Nudity detected",
-            remaining: Math.ceil(duration / 1000),
-            snapshot: data?.snapshot || null, // 👈 send back snapshot
-        });
+            let snapshotPath = null;
+            if (data?.snapshot) {
+                const base64Data = data.snapshot.replace(
+                    /^data:image\/\w+;base64,/,
+                    ""
+                );
+                const fileName = `ban_${Date.now()}_${ip.replace(
+                    /[:.]/g,
+                    "_"
+                )}.jpg`;
+                snapshotPath = path.join(SNAPSHOT_DIR, fileName);
+                fs.writeFileSync(snapshotPath, base64Data, "base64");
+            }
 
-        console.log("🚫 NSFW ban:", ip);
+            const banDoc = new Ban({
+                ip,
+                reason: data?.reason || "Nudity detected",
+                expiry,
+                snapshotPath,
+            });
+            await banDoc.save();
+
+            socket.emit("banned", {
+                reason: banDoc.reason,
+                remaining: Math.ceil((expiry.getTime() - Date.now()) / 1000),
+                snapshot: snapshotPath
+                    ? `/snapshots/${path.basename(snapshotPath)}`
+                    : null,
+            });
+
+            console.log("🚫 NSFW ban saved:", banDoc);
+        } catch (err) {
+            console.error("❌ Ban save error:", err);
+        }
     });
 });
 
