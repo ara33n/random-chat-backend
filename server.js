@@ -8,17 +8,13 @@ import path from "path";
 import filter from "leo-profanity";
 import mongoose from "mongoose";
 
-const app = express();
-app.use(cors());
-
 // ✅ MongoDB connect
 mongoose
-    .connect(process.env.MONGO_URI || "mongodb://127.0.0.1:27017/chatapp", {
-        useNewUrlParser: true,
-        useUnifiedTopology: true,
-    })
+    .connect(process.env.MONGO_URI || "mongodb://127.0.0.1:27017/chatapp")
     .then(() => console.log("✅ MongoDB connected"))
     .catch((err) => console.error("❌ MongoDB connect error:", err));
+const app = express();
+app.use(cors());
 
 // ✅ Ban Schema
 const banSchema = new mongoose.Schema({
