@@ -1,12 +1,14 @@
 import express from "express";
 import http from "http";
 import cors from "cors";
+import axios from "axios";
 import { Server as IOServer } from "socket.io";
 import geoip from "geoip-lite";
 import fs from "fs";
 import path from "path";
 import filter from "leo-profanity";
 import mongoose from "mongoose";
+import Payment from "./models/Payment.js";
 
 const app = express();
 app.use(cors());
@@ -60,6 +62,101 @@ app.get("/", (req, res) => {
 // ✅ Version route (frontend polls this)
 app.get("/version", (req, res) => {
     res.json({ version: appVersion });
+});
+
+const API_KEY = "YYB93M2-WBMM0HH-N17825T-ERPG0QN";
+
+// ✅ Create Payment
+app.post("/api/create-payment", async (req, res) => {
+    try {
+        const { amount, currency } = req.body;
+
+        const response = await axios.post(
+            "https://api.nowpayments.io/v1/payment",
+            {
+                price_amount: amount,
+                price_currency: currency,
+                pay_currency: "usdttrc20", // coin of choice
+                order_id: "order_" + Date.now(),
+                order_description: "Payment via NOWPayments",
+                ipn_callback_url:
+                    "https://strangtexx.onrender.com/api/payment-webhook",
+            },
+            {
+                headers: {
+                    "x-api-key": API_KEY,
+                    "Content-Type": "application/json",
+                },
+            }
+        );
+
+        // ✅ Save in DB
+        const newPayment = new Payment({
+            orderId: response.data.order_id,
+            amount: response.data.price_amount,
+            currency: response.data.price_currency,
+            payCurrency: response.data.pay_currency,
+            paymentStatus: response.data.payment_status,
+            paymentId: response.data.payment_id,
+        });
+
+        await newPayment.save();
+
+        res.json({ payment_url: response.data.invoice_url });
+    } catch (error) {
+        console.error(error.response?.data || error.message);
+        res.status(500).json({ error: "Payment creation failed" });
+    }
+});
+
+// ✅ Webhook listener
+app.post("/api/payment-webhook", async (req, res) => {
+    try {
+        const data = req.body;
+        console.log("NOWPayments webhook:", data);
+
+        // 🔹 DB me payment update
+        await Payment.findOneAndUpdate(
+            { paymentId: data.payment_id },
+            {
+                paymentStatus: data.payment_status,
+                txHash: data.payin_hash || null,
+            },
+            { new: true }
+        );
+
+        res.json({ message: "Webhook received" });
+    } catch (err) {
+        console.error("Webhook Error:", err);
+        res.status(500).json({ error: "Webhook failed" });
+    }
+});
+
+// ✅ Payment Status check
+app.get("/api/payment-status/:orderId", async (req, res) => {
+    try {
+        const { orderId } = req.params;
+
+        const payment = await Payment.findOne({ orderId });
+
+        if (!payment) {
+            return res.status(404).json({ error: "Payment not found" });
+        }
+
+        res.json({
+            orderId: payment.orderId,
+            amount: payment.amount,
+            currency: payment.currency,
+            payCurrency: payment.payCurrency,
+            status: payment.paymentStatus,
+            txHash: payment.txHash,
+            createdAt: payment.createdAt,
+            updatedAt: payment.updatedAt,
+        });
+    } catch (err) {
+        console.error("Status Check Error:", err);
+        res.status(500).json({ error: "Failed to fetch status" });
+    }
 });
 
 const server = http.createServer(app);

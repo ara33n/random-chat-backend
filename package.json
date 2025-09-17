@@ -1,6 +1,6 @@
 {
     "name": "random-chat-backend",
-    "version": "1.0.8",
+    "version": "1.0.9",
     "type": "module",
     "main": "server.js",
     "scripts": {
@@ -11,8 +11,9 @@
         "version:major": "npm version major && npm run start"
     },
     "dependencies": {
+        "axios": "^1.12.2",
         "cors": "^2.8.5",
-        "express": "^4.19.2",
+        "express": "^4.21.2",
         "geoip-lite": "^1.4.10",
         "leo-profanity": "^1.8.0",
         "mongoose": "^8.18.1",
