@@ -10,6 +10,7 @@ const PaymentSchema = new mongoose.Schema(
         paymentStatus: { type: String, default: "waiting" }, // waiting, confirmed, failed
         paymentId: String, // NOWPayments payment id
         txHash: String, // transaction hash from NOWPayments
+        raw: Object,
     },
     { timestamps: true }
 );

@@ -12,6 +12,8 @@ import Payment from "./models/Payment.js";
 
 const app = express();
 app.use(cors());
+app.use(express.json()); // ✅ JSON body parse
+app.use(express.urlencoded({ extended: true })); // ✅ form data parse
 // ✅ MongoDB connect
 mongoose
     .connect(process.env.MONGO_URI || "mongodb://127.0.0.1:27017/chatapp")
@@ -64,23 +66,35 @@ app.get("/version", (req, res) => {
     res.json({ version: appVersion });
 });
 
+app.get("/check-outbound-ip", async (req, res) => {
+    try {
+        const response = await axios.get("https://ifconfig.me/ip");
+        res.json({ outboundIP: response.data });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// const API_KEY = "HE6RG28-3H041KW-G34730N-6ENC0GG";
 const API_KEY = "YYB93M2-WBMM0HH-N17825T-ERPG0QN";
 
+// ✅ Create Payment
 // ✅ Create Payment
 app.post("/api/create-payment", async (req, res) => {
     try {
         const { amount, currency } = req.body;
+        console.log("Incoming body:", req.body);
 
+        // ✅ Use /v1/invoice instead of /v1/payment
         const response = await axios.post(
-            "https://api.nowpayments.io/v1/payment",
+            "https://api.nowpayments.io/v1/invoice",
             {
                 price_amount: amount,
                 price_currency: currency,
-                pay_currency: "usdttrc20", // coin of choice
+                pay_currency: "icx", // coin of choice
                 order_id: "order_" + Date.now(),
                 order_description: "Payment via NOWPayments",
-                ipn_callback_url:
-                    "https://strangtexx.onrender.com/api/payment-webhook",
+                ipn_callback_url: "http://localhost:3001/api/payment-webhook",
             },
             {
                 headers: {
@@ -90,6 +104,8 @@ app.post("/api/create-payment", async (req, res) => {
             }
         );
 
+        console.log("NOWPayments Invoice Response:", response.data);
+
         // ✅ Save in DB
         const newPayment = new Payment({
             orderId: response.data.order_id,
@@ -97,14 +113,20 @@ app.post("/api/create-payment", async (req, res) => {
             currency: response.data.price_currency,
             payCurrency: response.data.pay_currency,
             paymentStatus: response.data.payment_status,
-            paymentId: response.data.payment_id,
+            paymentId: response.data.id, // invoice id
         });
-
         await newPayment.save();
 
-        res.json({ payment_url: response.data.invoice_url });
+        // ✅ Return hosted checkout link
+        res.json({
+            payment_url: response.data.invoice_url,
+            orderId: response.data.order_id,
+        });
     } catch (error) {
-        console.error(error.response?.data || error.message);
+        console.error(
+            "Create Invoice Error:",
+            error.response?.data || error.message
+        );
         res.status(500).json({ error: "Payment creation failed" });
     }
 });
@@ -115,15 +137,26 @@ app.post("/api/payment-webhook", async (req, res) => {
         const data = req.body;
         console.log("NOWPayments webhook:", data);
 
-        // 🔹 DB me payment update
-        await Payment.findOneAndUpdate(
-            { paymentId: data.payment_id },
+        // 🔹 Update payment in DB
+        const updated = await Payment.findOneAndUpdate(
+            { orderId: data.order_id }, // ya paymentId: data.payment_id
             {
+                paymentId: data.payment_id,
+                orderId: data.order_id,
                 paymentStatus: data.payment_status,
                 txHash: data.payin_hash || null,
+                amount: data.price_amount,
+                currency: data.price_currency,
+                payCurrency: data.pay_currency,
+                amountReceived:
+                    data.amount_received || data.actually_paid || null,
+                updatedAt: data.updated_at || new Date(),
+                raw: data, // 👈 full webhook payload store for reference
             },
-            { new: true }
+            { new: true, upsert: true } // agar record na mile to create bhi kar dega
         );
+
+        console.log("Payment updated:", updated);
 
         res.json({ message: "Webhook received" });
     } catch (err) {
