@@ -19,13 +19,17 @@ mongoose
     .connect(process.env.MONGO_URI || "mongodb://127.0.0.1:27017/chatapp")
     .then(() => console.log("✅ MongoDB connected"))
     .catch((err) => console.error("❌ MongoDB connect error:", err));
-
+const API_KEY = "YYB93M2-WBMM0HH-N17825T-ERPG0QN";
 // ✅ Ban Schema
 const banSchema = new mongoose.Schema({
     ip: { type: String, required: true },
     reason: { type: String, required: true },
     expiry: { type: Date, required: true },
     snapshotBase64: { type: String },
+    paymentRequired: { type: Boolean, default: false }, // ✅ Payment needed to unban
+    paymentStatus: { type: String, default: "pending" }, // pending, success, cancelled
+    paymentOrderId: { type: String }, // NOWPayments order_id
+    paymentUrl: { type: String }, // Invoice URL
     createdAt: { type: Date, default: Date.now },
 });
 
@@ -76,7 +80,6 @@ app.get("/check-outbound-ip", async (req, res) => {
 });
 
 // const API_KEY = "HE6RG28-3H041KW-G34730N-6ENC0GG";
-const API_KEY = "YYB93M2-WBMM0HH-N17825T-ERPG0QN";
 
 // ✅ Create Payment
 // ✅ Create Payment
@@ -132,37 +135,86 @@ app.post("/api/create-payment", async (req, res) => {
 });
 
 // ✅ Webhook listener
-app.post("/api/payment-webhook", async (req, res) => {
+app.post("/api/create-payment", async (req, res) => {
     try {
-        const data = req.body;
-        console.log("NOWPayments webhook:", data);
+        const { ip, amount, currency } = req.body;
+        console.log("Incoming body:", req.body);
 
-        // 🔹 Update payment in DB
-        const updated = await Payment.findOneAndUpdate(
-            { orderId: data.order_id }, // ya paymentId: data.payment_id
+        // 🔹 Step 1: Check if user is banned
+        const ban = await Ban.findOne({ ip }).sort({ createdAt: -1 });
+        if (!ban) {
+            return res.status(400).json({ error: "User is not banned" });
+        }
+
+        // 🔹 Step 2: Create invoice on NOWPayments
+        const response = await axios.post(
+            "https://api.nowpayments.io/v1/invoice",
             {
-                paymentId: data.payment_id,
-                orderId: data.order_id,
-                paymentStatus: data.payment_status,
-                txHash: data.payin_hash || null,
-                amount: data.price_amount,
-                currency: data.price_currency,
-                payCurrency: data.pay_currency,
-                amountReceived:
-                    data.amount_received || data.actually_paid || null,
-                updatedAt: data.updated_at || new Date(),
-                raw: data, // 👈 full webhook payload store for reference
+                price_amount: amount || 5, // 💲 Default 5 USD to unban
+                price_currency: currency || "usd",
+                pay_currency: "icx", // fixed coin of choice
+                order_id: "ban_" + Date.now(),
+                order_description: "Ban removal fee",
+                ipn_callback_url: `${
+                    process.env.BASE_URL || "http://localhost:3001"
+                }/api/payment-webhook`,
             },
-            { new: true, upsert: true } // agar record na mile to create bhi kar dega
+            {
+                headers: {
+                    "x-api-key": API_KEY,
+                    "Content-Type": "application/json",
+                },
+            }
         );
 
-        console.log("Payment updated:", updated);
+        console.log("NOWPayments Invoice Response:", response.data);
 
-        res.json({ message: "Webhook received" });
-    } catch (err) {
-        console.error("Webhook Error:", err);
-        res.status(500).json({ error: "Webhook failed" });
+        // 🔹 Step 3: Update ban document with payment details
+        ban.paymentRequired = true;
+        ban.paymentOrderId = response.data.order_id;
+        ban.paymentUrl = response.data.invoice_url;
+        ban.paymentStatus = response.data.payment_status; // "waiting"
+        await ban.save();
+
+        // 🔹 Step 4: Also log payment in Payment collection
+        const newPayment = new Payment({
+            orderId: response.data.order_id,
+            amount: response.data.price_amount,
+            currency: response.data.price_currency,
+            payCurrency: response.data.pay_currency,
+            paymentStatus: response.data.payment_status,
+            paymentId: response.data.id, // invoice id
+            ip, // 👈 so we can link payment to user ban
+        });
+        await newPayment.save();
+
+        // 🔹 Step 5: Return hosted checkout link to frontend
+        res.json({
+            payment_url: response.data.invoice_url,
+            orderId: response.data.order_id,
+            banReason: ban.reason,
+            snapshot: ban.snapshotBase64 || null,
+        });
+    } catch (error) {
+        console.error(
+            "Create Invoice Error:",
+            error.response?.data || error.message
+        );
+        res.status(500).json({ error: "Payment creation failed" });
     }
+});
+
+app.post("/api/payment-cancel", async (req, res) => {
+    const { ip } = req.body;
+    const ban = await Ban.findOne({ ip, paymentRequired: true });
+    if (!ban) return res.status(404).json({ error: "No active ban" });
+
+    ban.paymentStatus = "cancelled";
+    ban.paymentOrderId = null;
+    ban.paymentUrl = null;
+    await ban.save();
+
+    res.json({ message: "Payment cancelled, user can retry" });
 });
 
 // ✅ Payment Status check
@@ -489,6 +541,7 @@ io.on("connection", async (socket) => {
         socket.emit("banned", {
             reason: banDoc.reason,
             remaining: Math.ceil(duration / 1000),
+            paymentUrl: banDoc.paymentUrl, // 👈 show in frontend
             snapshot: banDoc.snapshotBase64 || null,
         });
 
@@ -518,9 +571,13 @@ io.on("connection", async (socket) => {
             });
             await banDoc.save();
 
+            // ❌ Immediately disconnect from partner
+            breakPair(socket, "partner-left");
+
             socket.emit("banned", {
                 reason: banDoc.reason,
                 remaining: Math.ceil((expiry.getTime() - Date.now()) / 1000),
+                paymentUrl: banDoc.paymentUrl, // 👈 show in frontend
                 snapshot: snapshotBase64 || null, // 👈 send base64 back to frontend
             });
 
