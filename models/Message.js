@@ -1,14 +1,17 @@
 import mongoose from "mongoose";
 
-const messageSchema = new mongoose.Schema({
-  roomId: { type: String, required: true },
-  senderIp: { type: String },
-  receiverIp: { type: String },
-  senderSocketId: { type: String },
-  receiverSocketId: { type: String },
-  text: { type: String },
-  reported: { type: Boolean, default: false },
-  createdAt: { type: Date, default: Date.now }
-});
+const MessageSchema = new mongoose.Schema(
+    {
+        roomId: { type: String, index: true },
+        text: String,
+        senderIp: String,
+        receiverIp: String,
+        senderSocketId: String,
+        receiverSocketId: String,
+        flagged: { type: Boolean, default: false },
+        reported: { type: Boolean, default: false },
+    },
+    { timestamps: true }
+);
 
-export default mongoose.model("Message", messageSchema);
+export default mongoose.model("Message", MessageSchema);

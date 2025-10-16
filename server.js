@@ -514,8 +514,8 @@ io.on("connection", async (socket) => {
     });
 
     // ✅ Messages (with bad word check + ban)
-    socket.on("message", (msg) => {
-        // wrapped by moderation+storage
+    // ✅ Messages (with bad word check + ban)
+    socket.on("message", async (msg) => {
         if (isBanned(ip)) {
             socket.emit("banned", {
                 reason: "You are banned for inappropriate words.",
@@ -525,62 +525,159 @@ io.on("connection", async (socket) => {
         }
 
         const partner = safePartner(socket.id);
+        if (!partner) return;
 
-        if (filter.check(msg)) {
+        // Partner IP (logging/storage ke liye)
+        const partnerIp =
+            partner.handshake.headers["x-forwarded-for"]?.split(",")[0] ||
+            partner.handshake.address ||
+            null;
+
+        // ✅ Stable room key
+        const roomId = [socket.id, partner.id].sort().join("_");
+
+        // Kya yeh msg me bad-word hai?
+        const isBad = filter.check(msg);
+
+        // ⚠️ STRIKES: sender ke strikes update
+        if (isBad) {
             const count = (badWordCount.get(ip) || 0) + 1;
             badWordCount.set(ip, count);
 
+            // Sender ko warning popup
             socket.emit("bad-word-warning", { text: msg, strikes: count });
 
-            if (count >= 2) {
-                const banTime = 60 * 1000;
-                bannedIPs.set(ip, Date.now() + banTime);
+            // ✅ Receiver ko bhi message JAYEGA + ek warning ribbon/event
+            partner.emit("message", msg);
+            partner.emit("warning", {
+                text: msg,
+                from: "partner",
+                warning: "Disallowed content",
+            });
 
+            // ✅ DB me message save (flagged)
+            try {
+                await new Message({
+                    roomId,
+                    text: msg,
+                    senderIp: ip,
+                    receiverIp: partnerIp,
+                    senderSocketId: socket.id,
+                    receiverSocketId: partner.id,
+                    flagged: true, // optional field (agar schema me ho)
+                    reported: false, // cleaner se bachane ke liye jab tak report na ho
+                }).save();
+            } catch (e) {
+                console.error("Message save error (flagged):", e);
+            }
+
+            // 2 strikes -> temp ban (ya jo threshold chaho)
+            if (count >= 2) {
+                const banTime = 60 * 1000; // 1 min
+                bannedIPs.set(ip, Date.now() + banTime);
                 socket.emit("banned", {
                     reason: "You are banned for inappropriate text.",
                     remaining: Math.ceil(banTime / 1000),
                 });
-
-                return;
             }
+
+            // Note: yahin return nahi kar rahe — upar message/ warning already send ho chuka hai
             return;
         }
 
-        if (partner) partner.emit("message", msg);
+        // ✅ Clean message flow:
+        // 1) Receiver ko message
+        partner.emit("message", msg);
+
+        // 2) DB save
+        try {
+            await new Message({
+                roomId,
+                text: msg,
+                senderIp: ip,
+                receiverIp: partnerIp,
+                senderSocketId: socket.id,
+                receiverSocketId: partner.id,
+                reported: false,
+            }).save();
+        } catch (e) {
+            console.error("Message save error:", e);
+        }
     });
 
     // ✅ Reporting by user
+    // ✅ Reporting by user (roomId-first + disconnect)
     socket.on("report-user", async (data) => {
         try {
-            const { accusedIp, accusedSocketId, reason } = data || {};
-            // find messages between this socket and accused (by socket ids or ip)
-            const msgs = await Message.find({
-                $or: [
-                    { senderIp: ip, receiverIp: accusedIp },
-                    { senderIp: accusedIp, receiverIp: ip },
-                    {
-                        senderSocketId: socket.id,
-                        receiverSocketId: accusedSocketId,
-                    },
-                    {
-                        senderSocketId: accusedSocketId,
-                        receiverSocketId: socket.id,
-                    },
-                ],
-            }).sort({ createdAt: 1 });
+            const {
+                accusedIp: accIpFromClient,
+                accusedSocketId,
+                reason,
+                scope,
+            } = data || {};
+            if (!accusedSocketId && !accIpFromClient) {
+                socket.emit("report-error", {
+                    error: "Missing accused identifier",
+                });
+                return;
+            }
 
-            // mark these messages as reported so they won't be auto-deleted
-            const ids = msgs.map((m) => m._id);
-            if (ids.length)
+            // accused ip resolve (admin view ke liye helpful)
+            let accusedIp = accIpFromClient || null;
+            if (!accusedIp && accusedSocketId) {
+                const accusedSock = io.sockets.sockets.get(accusedSocketId);
+                accusedIp =
+                    accusedSock?.handshake?.headers?.["x-forwarded-for"]?.split(
+                        ","
+                    )[0] ||
+                    accusedSock?.handshake?.address ||
+                    null;
+            }
+            if (!accusedIp) accusedIp = "unknown";
+
+            // ✅ Most reliable way: roomId by socket-pair
+            const roomId = [socket.id, accusedSocketId]
+                .filter(Boolean)
+                .sort()
+                .join("_");
+
+            // 1st try: by roomId
+            let msgs = await Message.find({ roomId }).sort({ createdAt: 1 });
+
+            // Fallbacks: socket-pair ya IP-pair (edge cases)
+            if (!msgs.length) {
+                msgs = await Message.find({
+                    $or: [
+                        {
+                            senderSocketId: socket.id,
+                            receiverSocketId: accusedSocketId,
+                        },
+                        {
+                            senderSocketId: accusedSocketId,
+                            receiverSocketId: socket.id,
+                        },
+                        { senderIp: ip, receiverIp: accusedIp },
+                        { senderIp: accusedIp, receiverIp: ip },
+                    ],
+                }).sort({ createdAt: 1 });
+            }
+
+            // Mark messages reported so auto-cleaner na delete kare
+            if (msgs.length) {
+                const ids = msgs.map((m) => m._id);
                 await Message.updateMany(
                     { _id: { $in: ids } },
                     { reported: true }
                 );
+            }
 
+            // Report save
             const report = new Report({
                 reporterIp: ip,
-                accusedIp: accusedIp || null,
-                reason: reason || "User report",
+                accusedIp,
+                reason:
+                    reason ||
+                    (scope ? `User report (${scope})` : "User report"),
                 messages: msgs.map((m) => ({
                     text: m.text,
                     senderIp: m.senderIp,
@@ -591,10 +688,26 @@ io.on("connection", async (socket) => {
                 })),
             });
             await report.save();
+
             socket.emit("report-success", {
                 message: "Report submitted to admin",
             });
-            console.log("Report created:", report._id);
+
+            // ✅ Disconnect pair after report
+            breakPair(socket, "partner-left");
+            socket.emit("self-stopped");
+            modeOf.delete(socket.id);
+            countryOf.delete(socket.id);
+            topicsOf.delete(socket.id);
+
+            console.log(
+                "🚨 Report created:",
+                report._id,
+                "msgs:",
+                msgs.length,
+                "scope:",
+                scope || "current"
+            );
         } catch (err) {
             console.error("Report error:", err);
             socket.emit("report-error", { error: "Failed to submit report" });
