@@ -30,6 +30,8 @@ const banSchema = new mongoose.Schema({
     snapshotBase64: { type: String },
     paymentRequired: { type: Boolean, default: false }, // ✅ Payment needed to unban
     paymentStatus: { type: String, default: "pending" }, // pending, success, cancelled
+    status: { type: String, enum: ["active", "closed"], default: "active" }, // 👈 NEW
+    closedAt: { type: Date },
     paymentOrderId: { type: String }, // NOWPayments order_id
     paymentUrl: { type: String }, // Invoice URL
     createdAt: { type: Date, default: Date.now },
@@ -39,11 +41,15 @@ const Ban = mongoose.model("Ban", banSchema);
 
 // ✅ Helper: check ban
 async function getActiveBan(ip) {
-    const ban = await Ban.findOne({ ip }).sort({ createdAt: -1 });
+    const ban = await Ban.findOne({ ip, status: "active" }).sort({
+        createdAt: -1,
+    });
     if (!ban) return null;
-
     if (Date.now() > ban.expiry.getTime()) {
-        // expired → keep record, but not active
+        // expire ho gaya → status close
+        ban.status = "closed";
+        ban.closedAt = new Date();
+        await ban.save();
         return null;
     }
     return ban;
@@ -269,8 +275,9 @@ app.get("/api/payment-status/:orderId", async (req, res) => {
 });
 
 // -------------------- Admin API: reports, ban control --------------------
+// ================== ADMIN: BANS & REPORTS SYNCED ==================
 
-// Get all reports (admin)
+// Get all reports (admin) – (same as yours)
 app.get("/admin/reports", adminAuth, async (req, res) => {
     try {
         const reports = await Report.find().sort({ createdAt: -1 });
@@ -281,22 +288,26 @@ app.get("/admin/reports", adminAuth, async (req, res) => {
     }
 });
 
-// Admin: ban a user (create Ban doc)
+// Ban user (create active ban) + mark reports as 'banned'
 app.post("/admin/ban-user", adminAuth, async (req, res) => {
     try {
         const { ip, durationMs, reason } = req.body;
-        const banDuration = durationMs || 10 * 60 * 1000; // 10 minutes default
+        const banDuration = durationMs || 10 * 60 * 1000;
         const expiry = new Date(Date.now() + banDuration);
 
         const ban = new Ban({
             ip,
             reason: reason || "Manual admin ban",
             expiry,
+            status: "active",
         });
         await ban.save();
 
-        // mark related reports as banned
-        await Report.updateMany({ accusedIp: ip }, { status: "banned" });
+        // optional: mark related reports as 'banned'
+        await Report.updateMany(
+            { accusedIp: ip, status: { $ne: "banned" } },
+            { status: "banned" }
+        );
 
         res.json({ message: "User banned successfully", ban });
     } catch (err) {
@@ -305,20 +316,197 @@ app.post("/admin/ban-user", adminAuth, async (req, res) => {
     }
 });
 
-// Admin: resolve a report
+// Unban user (by ip OR banId) – also CLOSE related reports
+app.post("/admin/unban-user", adminAuth, async (req, res) => {
+    try {
+        const { ip, banId } = req.body;
+        let ban;
+        if (banId) {
+            ban = await Ban.findById(banId);
+        } else if (ip) {
+            ban = await Ban.findOne({ ip, status: "active" }).sort({
+                createdAt: -1,
+            });
+        }
+        if (!ban)
+            return res.status(404).json({ error: "Active ban not found" });
+
+        ban.status = "closed";
+        ban.closedAt = new Date();
+        if (ban.expiry > new Date()) ban.expiry = new Date(Date.now() - 1000);
+        await ban.save();
+
+        // ⬇️ close all related reports for that IP
+        await Report.updateMany(
+            { accusedIp: ban.ip, status: { $ne: "closed" } },
+            { status: "closed" }
+        );
+
+        return res.json({ message: "User unbanned", ban });
+    } catch (err) {
+        console.error("Admin unban error:", err);
+        res.status(500).json({ error: "Failed to unban user" });
+    }
+});
+
+// Close ban (body banId) – also CLOSE related reports
+app.post("/admin/close-ban", adminAuth, async (req, res) => {
+    try {
+        const { banId } = req.body;
+        if (!banId) return res.status(400).json({ error: "banId required" });
+        const ban = await Ban.findById(banId);
+        if (!ban) return res.status(404).json({ error: "Ban not found" });
+        if (ban.status === "closed") {
+            // still make sure reports are closed
+            await Report.updateMany(
+                { accusedIp: ban.ip, status: { $ne: "closed" } },
+                { status: "closed" }
+            );
+            return res.json({ message: "Already closed", ban });
+        }
+
+        ban.status = "closed";
+        ban.closedAt = new Date();
+        if (ban.expiry > new Date()) ban.expiry = new Date(Date.now() - 1000);
+        await ban.save();
+
+        // ⬇️ close related reports
+        await Report.updateMany(
+            { accusedIp: ban.ip, status: { $ne: "closed" } },
+            { status: "closed" }
+        );
+
+        res.json({ message: "Ban closed", ban });
+    } catch (err) {
+        console.error("Close ban error:", err);
+        res.status(500).json({ error: "Failed to close ban" });
+    }
+});
+
+// NEW: Unban by ID (matches frontend /admin/unban/:id)
+app.post("/admin/unban/:id", adminAuth, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const ban = await Ban.findById(id);
+        if (!ban) return res.status(404).json({ error: "Ban not found" });
+
+        ban.status = "closed";
+        ban.closedAt = new Date();
+        if (ban.expiry > new Date()) ban.expiry = new Date(Date.now() - 1000);
+        await ban.save();
+
+        await Report.updateMany(
+            { accusedIp: ban.ip, status: { $ne: "closed" } },
+            { status: "closed" }
+        );
+
+        res.json({ ok: true, ban });
+    } catch (e) {
+        console.error("Unban by id error:", e);
+        res.status(500).json({ error: "Failed to unban (id)" });
+    }
+});
+
+// NEW: Unban by IP (matches frontend /admin/unban-by-ip)
+app.post("/admin/unban-by-ip", adminAuth, async (req, res) => {
+    try {
+        const { ip } = req.body;
+        if (!ip) return res.status(400).json({ error: "ip required" });
+
+        const upd = await Ban.updateMany(
+            { ip, status: "active" },
+            {
+                status: "closed",
+                closedAt: new Date(),
+                expiry: new Date(Date.now() - 1000),
+            }
+        );
+
+        await Report.updateMany(
+            { accusedIp: ip, status: { $ne: "closed" } },
+            { status: "closed" }
+        );
+
+        res.json({ ok: true, updated: upd.modifiedCount });
+    } catch (e) {
+        console.error("Unban by ip error:", e);
+        res.status(500).json({ error: "Failed to unban (ip)" });
+    }
+});
+
+// NEW: Close ban by ID (matches frontend /admin/close-ban/:id)
+app.post("/admin/close-ban/:id", adminAuth, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const ban = await Ban.findById(id);
+        if (!ban) return res.status(404).json({ error: "Ban not found" });
+
+        ban.status = "closed";
+        ban.closedAt = new Date();
+        if (ban.expiry > new Date()) ban.expiry = new Date(Date.now() - 1000);
+        await ban.save();
+
+        await Report.updateMany(
+            { accusedIp: ban.ip, status: { $ne: "closed" } },
+            { status: "closed" }
+        );
+
+        res.json({ ok: true, ban });
+    } catch (e) {
+        console.error("Close ban by id error:", e);
+        res.status(500).json({ error: "Failed to close ban (id)" });
+    }
+});
+
+// List bans (activeOnly supported) – (same as yours)
+app.get("/admin/bans", adminAuth, async (req, res) => {
+    try {
+        const activeOnly = String(req.query.activeOnly || "true") === "true";
+        const q = activeOnly ? { status: "active" } : {};
+        const bans = await Ban.find(q).sort({ createdAt: -1 });
+        res.json(bans);
+    } catch (e) {
+        console.error("Admin bans list error:", e);
+        res.status(500).json({ error: "Failed to fetch bans" });
+    }
+});
+
+// Close report (manual)
+app.post("/admin/close-report", adminAuth, async (req, res) => {
+    try {
+        const { reportId } = req.body;
+        if (!reportId)
+            return res.status(400).json({ error: "reportId required" });
+        await Report.findByIdAndUpdate(reportId, { status: "closed" });
+        res.json({ message: "Report closed" });
+    } catch (err) {
+        console.error("Close report error:", err);
+        res.status(500).json({ error: "Failed to close report" });
+    }
+});
+
+// Resolve report (pending -> reviewed/banned)
 app.post("/admin/resolve-report", adminAuth, async (req, res) => {
     try {
         const { reportId, action } = req.body;
         if (!reportId)
             return res.status(400).json({ error: "reportId required" });
+
         const update = { status: "reviewed" };
-        if (action === "ban") update.status = "banned";
+        if (String(action).toLowerCase() === "ban") update.status = "banned";
+
         await Report.findByIdAndUpdate(reportId, update);
-        res.json({ message: "Report updated" });
+        res.json({ message: "Report updated", action: update.status });
     } catch (err) {
         console.error("Resolve report error:", err);
         res.status(500).json({ error: "Failed to update report" });
     }
+});
+
+// Alias to avoid 404s (backward compat)
+app.post("/admin/report/resolve", adminAuth, async (req, res, next) => {
+    req.url = "/admin/resolve-report";
+    next();
 });
 
 // -------------------------------------------------------------------------
@@ -605,7 +793,6 @@ io.on("connection", async (socket) => {
         }
     });
 
-    // ✅ Reporting by user
     // ✅ Reporting by user (roomId-first + disconnect)
     socket.on("report-user", async (data) => {
         try {
