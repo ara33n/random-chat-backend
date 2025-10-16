@@ -9,6 +9,8 @@ import path from "path";
 import filter from "leo-profanity";
 import mongoose from "mongoose";
 import Payment from "./models/Payment.js";
+import Message from "./models/Message.js";
+import Report from "./models/Report.js";
 
 const app = express();
 app.use(cors());
@@ -61,6 +63,28 @@ try {
 app.use("/snapshots", express.static(path.join(process.cwd(), "snapshots")));
 
 // ✅ Root route
+
+// -------------------- Admin auth (simple header check) --------------------
+function adminAuth(req, res, next) {
+    // Accept either x-admin-user/x-admin-pass headers OR x-admin-token for compatibility
+    const user = req.headers["x-admin-user"];
+    const pass = req.headers["x-admin-pass"];
+    const token = req.headers["x-admin-token"];
+    // Default credentials as requested
+    const ADMIN_USER = process.env.ADMIN_USER || "admin";
+    const ADMIN_PASS = process.env.ADMIN_PASS || "Abcd!234";
+    const ADMIN_TOKEN = process.env.ADMIN_TOKEN || null; // optional
+
+    if (
+        (user === ADMIN_USER && pass === ADMIN_PASS) ||
+        (token && token === ADMIN_TOKEN)
+    ) {
+        return next();
+    }
+    return res.status(403).json({ error: "Unauthorized" });
+}
+// -------------------------------------------------------------------------
+
 app.get("/", (req, res) => {
     res.json({ ok: true, message: "Random Chat Signaling Server running." });
 });
@@ -244,6 +268,61 @@ app.get("/api/payment-status/:orderId", async (req, res) => {
     }
 });
 
+// -------------------- Admin API: reports, ban control --------------------
+
+// Get all reports (admin)
+app.get("/admin/reports", adminAuth, async (req, res) => {
+    try {
+        const reports = await Report.find().sort({ createdAt: -1 });
+        res.json(reports);
+    } catch (err) {
+        console.error("Admin reports error:", err);
+        res.status(500).json({ error: "Failed to fetch reports" });
+    }
+});
+
+// Admin: ban a user (create Ban doc)
+app.post("/admin/ban-user", adminAuth, async (req, res) => {
+    try {
+        const { ip, durationMs, reason } = req.body;
+        const banDuration = durationMs || 10 * 60 * 1000; // 10 minutes default
+        const expiry = new Date(Date.now() + banDuration);
+
+        const ban = new Ban({
+            ip,
+            reason: reason || "Manual admin ban",
+            expiry,
+        });
+        await ban.save();
+
+        // mark related reports as banned
+        await Report.updateMany({ accusedIp: ip }, { status: "banned" });
+
+        res.json({ message: "User banned successfully", ban });
+    } catch (err) {
+        console.error("Admin ban error:", err);
+        res.status(500).json({ error: "Failed to ban user" });
+    }
+});
+
+// Admin: resolve a report
+app.post("/admin/resolve-report", adminAuth, async (req, res) => {
+    try {
+        const { reportId, action } = req.body;
+        if (!reportId)
+            return res.status(400).json({ error: "reportId required" });
+        const update = { status: "reviewed" };
+        if (action === "ban") update.status = "banned";
+        await Report.findByIdAndUpdate(reportId, update);
+        res.json({ message: "Report updated" });
+    } catch (err) {
+        console.error("Resolve report error:", err);
+        res.status(500).json({ error: "Failed to update report" });
+    }
+});
+
+// -------------------------------------------------------------------------
+
 const server = http.createServer(app);
 const io = new IOServer(server, {
     // cors: {
@@ -269,7 +348,7 @@ const startedAt = new Map();
 const topicsOf = new Map(); // ✅ socket.id -> topics array
 
 // ✅ Bad words list
-const badWords = ["fuck", "shit", "bitch", "sex", "asshole"];
+const badWords = ["fuck", "shit", "bitch", "sex", "asshole", "islam"];
 
 // ✅ Ban maps
 const badWordCount = new Map(); // ip -> count
@@ -281,7 +360,7 @@ function broadcastOnlineCount() {
 }
 
 filter.loadDictionary(); // ✅ load default bad words
-filter.add(["sex", "nude", "xxx"]); // ✅ extra words if needed
+filter.add(["sex", "nude", "xxx", "islam"]); // ✅ extra words if needed
 
 // ✅ Ban check
 function isBanned(ip) {
@@ -436,6 +515,7 @@ io.on("connection", async (socket) => {
 
     // ✅ Messages (with bad word check + ban)
     socket.on("message", (msg) => {
+        // wrapped by moderation+storage
         if (isBanned(ip)) {
             socket.emit("banned", {
                 reason: "You are banned for inappropriate words.",
@@ -467,6 +547,58 @@ io.on("connection", async (socket) => {
         }
 
         if (partner) partner.emit("message", msg);
+    });
+
+    // ✅ Reporting by user
+    socket.on("report-user", async (data) => {
+        try {
+            const { accusedIp, accusedSocketId, reason } = data || {};
+            // find messages between this socket and accused (by socket ids or ip)
+            const msgs = await Message.find({
+                $or: [
+                    { senderIp: ip, receiverIp: accusedIp },
+                    { senderIp: accusedIp, receiverIp: ip },
+                    {
+                        senderSocketId: socket.id,
+                        receiverSocketId: accusedSocketId,
+                    },
+                    {
+                        senderSocketId: accusedSocketId,
+                        receiverSocketId: socket.id,
+                    },
+                ],
+            }).sort({ createdAt: 1 });
+
+            // mark these messages as reported so they won't be auto-deleted
+            const ids = msgs.map((m) => m._id);
+            if (ids.length)
+                await Message.updateMany(
+                    { _id: { $in: ids } },
+                    { reported: true }
+                );
+
+            const report = new Report({
+                reporterIp: ip,
+                accusedIp: accusedIp || null,
+                reason: reason || "User report",
+                messages: msgs.map((m) => ({
+                    text: m.text,
+                    senderIp: m.senderIp,
+                    receiverIp: m.receiverIp,
+                    senderSocketId: m.senderSocketId,
+                    receiverSocketId: m.receiverSocketId,
+                    createdAt: m.createdAt,
+                })),
+            });
+            await report.save();
+            socket.emit("report-success", {
+                message: "Report submitted to admin",
+            });
+            console.log("Report created:", report._id);
+        } catch (err) {
+            console.error("Report error:", err);
+            socket.emit("report-error", { error: "Failed to submit report" });
+        }
     });
 
     // ✅ Typing indicator
@@ -589,6 +721,25 @@ io.on("connection", async (socket) => {
 });
 
 const PORT = process.env.PORT || 3001;
+
+// -------------------- Auto-cleaner: delete non-reported messages older than 1 hour --------------------
+setInterval(async () => {
+    try {
+        const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+        const res = await Message.deleteMany({
+            createdAt: { $lt: oneHourAgo },
+            reported: false,
+        });
+        if (res.deletedCount)
+            console.log(
+                `Auto-cleaner: deleted ${res.deletedCount} old messages`
+            );
+    } catch (err) {
+        console.error("Auto-cleaner error:", err);
+    }
+}, 10 * 60 * 1000);
+// -------------------------------------------------------------------------
+
 server.listen(PORT, () => {
     console.log("✅ Signaling server listening on", PORT);
     console.log("🚀 Current App Version:", appVersion);
