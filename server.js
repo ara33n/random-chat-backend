@@ -2,51 +2,75 @@ import express from "express";
 import http from "http";
 import cors from "cors";
 import axios from "axios";
+import cookieParser from "cookie-parser";
+import jwt from "jsonwebtoken";
+import { OAuth2Client } from "google-auth-library";
 import { Server as IOServer } from "socket.io";
 import geoip from "geoip-lite";
 import fs from "fs";
 import path from "path";
 import filter from "leo-profanity";
 import mongoose from "mongoose";
+
+// === Existing models ===
 import Payment from "./models/Payment.js";
 import Message from "./models/Message.js";
 import Report from "./models/Report.js";
 
+// === New user model ===
+import User from "./models/User.js";
+
+// ---------------- App & DB ----------------
 const app = express();
-app.use(cors());
-app.use(express.json()); // ✅ JSON body parse
-app.use(express.urlencoded({ extended: true })); // ✅ form data parse
-// ✅ MongoDB connect
+app.use(cors({ origin: true, credentials: true }));
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());
+
 mongoose
     .connect(process.env.MONGO_URI || "mongodb://127.0.0.1:27017/chatapp")
     .then(() => console.log("✅ MongoDB connected"))
     .catch((err) => console.error("❌ MongoDB connect error:", err));
-const API_KEY = "YYB93M2-WBMM0HH-N17825T-ERPG0QN";
-// ✅ Ban Schema
+
+// ---------------- Env & Constants ----------------
+const API_KEY = process.env.NOWPAY_API_KEY || "YYB93M2-WBMM0HH-N17825T-ERPG0QN";
+const GOOGLE_CLIENT_ID =
+    process.env.GOOGLE_CLIENT_ID ||
+    "997739380757-jluek15p8cbm80ut04fibbkl9jr6ofno.apps.googleusercontent.com";
+const JWT_SECRET = process.env.JWT_SECRET || "change_me_in_prod";
+const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
+
+// ---------------- Ban Schema (extended) ----------------
 const banSchema = new mongoose.Schema({
-    ip: { type: String, required: true },
+    ip: { type: String },
+    email: { type: String },
     reason: { type: String, required: true },
     expiry: { type: Date, required: true },
     snapshotBase64: { type: String },
-    paymentRequired: { type: Boolean, default: false }, // ✅ Payment needed to unban
+    paymentRequired: { type: Boolean, default: false },
     paymentStatus: { type: String, default: "pending" }, // pending, success, cancelled
-    status: { type: String, enum: ["active", "closed"], default: "active" }, // 👈 NEW
+    status: { type: String, enum: ["active", "closed"], default: "active" },
     closedAt: { type: Date },
-    paymentOrderId: { type: String }, // NOWPayments order_id
-    paymentUrl: { type: String }, // Invoice URL
+    paymentOrderId: { type: String },
+    paymentUrl: { type: String },
     createdAt: { type: Date, default: Date.now },
 });
-
 const Ban = mongoose.model("Ban", banSchema);
 
-// ✅ Helper: check ban
-async function getActiveBan(ip) {
-    const ban = await Ban.findOne({ ip, status: "active" }).sort({
-        createdAt: -1,
-    });
+// ---------------- Helpers ----------------
+async function getActiveBan({ ip, email }) {
+    // Prefer email if present
+    let q = email ? { email, status: "active" } : { ip, status: "active" };
+    let ban = await Ban.findOne(q).sort({ createdAt: -1 });
+    if (!ban && email && ip) {
+        // fallback to IP if email ban not found
+        ban = await Ban.findOne({ ip, status: "active" }).sort({
+            createdAt: -1,
+        });
+    }
     if (!ban) return null;
+
     if (Date.now() > ban.expiry.getTime()) {
-        // expire ho gaya → status close
         ban.status = "closed";
         ban.closedAt = new Date();
         await ban.save();
@@ -55,31 +79,28 @@ async function getActiveBan(ip) {
     return ban;
 }
 
-// ✅ Version read from package.json
+// read version
 const pkgPath = path.join(process.cwd(), "package.json");
 let appVersion = "1.0.1";
 try {
     const raw = fs.readFileSync(pkgPath, "utf-8");
     const parsed = JSON.parse(raw);
-    appVersion = parsed.version;
-} catch (err) {
-    console.warn("⚠️ Could not read package.json version, defaulting to 1.0.0");
+    appVersion = parsed.version || appVersion;
+} catch {
+    console.warn("⚠️ Could not read package.json version, defaulting to 1.0.1");
 }
 
 app.use("/snapshots", express.static(path.join(process.cwd(), "snapshots")));
 
-// ✅ Root route
-
-// -------------------- Admin auth (simple header check) --------------------
+// ---------------- Admin auth (simple header check) ----------------
 function adminAuth(req, res, next) {
-    // Accept either x-admin-user/x-admin-pass headers OR x-admin-token for compatibility
     const user = req.headers["x-admin-user"];
     const pass = req.headers["x-admin-pass"];
     const token = req.headers["x-admin-token"];
-    // Default credentials as requested
+
     const ADMIN_USER = process.env.ADMIN_USER || "admin";
     const ADMIN_PASS = process.env.ADMIN_PASS || "Abcd!234";
-    const ADMIN_TOKEN = process.env.ADMIN_TOKEN || null; // optional
+    const ADMIN_TOKEN = process.env.ADMIN_TOKEN || null;
 
     if (
         (user === ADMIN_USER && pass === ADMIN_PASS) ||
@@ -89,18 +110,13 @@ function adminAuth(req, res, next) {
     }
     return res.status(403).json({ error: "Unauthorized" });
 }
-// -------------------------------------------------------------------------
 
-app.get("/", (req, res) => {
-    res.json({ ok: true, message: "Random Chat Signaling Server running." });
-});
-
-// ✅ Version route (frontend polls this)
-app.get("/version", (req, res) => {
-    res.json({ version: appVersion });
-});
-
-app.get("/check-outbound-ip", async (req, res) => {
+// ---------------- Basic routes ----------------
+app.get("/", (req, res) =>
+    res.json({ ok: true, message: "Random Chat Signaling Server running." })
+);
+app.get("/version", (req, res) => res.json({ version: appVersion }));
+app.get("/check-outbound-ip", async (_req, res) => {
     try {
         const response = await axios.get("https://ifconfig.me/ip");
         res.json({ outboundIP: response.data });
@@ -109,22 +125,90 @@ app.get("/check-outbound-ip", async (req, res) => {
     }
 });
 
-// const API_KEY = "HE6RG28-3H041KW-G34730N-6ENC0GG";
+// ---------------- Google Auth ----------------
+function authOptional(req, _res, next) {
+    const raw = req.cookies?.session;
+    if (raw) {
+        try {
+            req.user = jwt.verify(raw, JWT_SECRET);
+        } catch {
+            req.user = null;
+        }
+    }
+    next();
+}
 
-// ✅ Create Payment
-// ✅ Create Payment
+app.post("/auth/google", async (req, res) => {
+    try {
+        const { idToken } = req.body;
+        if (!idToken)
+            return res.status(400).json({ error: "idToken required" });
+
+        const ticket = await googleClient.verifyIdToken({
+            idToken,
+            audience: GOOGLE_CLIENT_ID,
+        });
+        const payload = ticket.getPayload();
+        if (!payload?.sub || !payload?.email) {
+            return res.status(401).json({ error: "Invalid Google token" });
+        }
+
+        const googleId = payload.sub;
+        const email = payload.email;
+        const name = payload.name || "";
+        const picture = payload.picture || "";
+
+        // Upsert user
+        const now = new Date();
+        const user = await User.findOneAndUpdate(
+            { googleId },
+            {
+                $set: { email, name, picture },
+                $inc: { loginCount: 1 },
+                $setOnInsert: { createdAt: now },
+                lastLoginAt: now,
+            },
+            { upsert: true, new: true }
+        );
+
+        const token = jwt.sign(
+            { uid: googleId, email, name, picture },
+            JWT_SECRET,
+            { expiresIn: "7d" }
+        );
+        res.cookie("session", token, {
+            httpOnly: true,
+            sameSite: "lax",
+            secure: process.env.NODE_ENV === "production",
+            maxAge: 7 * 24 * 60 * 60 * 1000,
+        });
+        res.json({ ok: true, profile: { email, name, picture } });
+    } catch (e) {
+        console.error("Google auth error:", e);
+        res.status(401).json({ error: "Invalid Google token" });
+    }
+});
+
+app.post("/auth/logout", (_req, res) => {
+    res.clearCookie("session", { httpOnly: true, sameSite: "lax" });
+    res.json({ ok: true });
+});
+
+app.get("/auth/me", authOptional, (req, res) => {
+    if (!req.user) return res.json({ ok: false });
+    res.json({ ok: true, user: req.user });
+});
+
+// ---------------- Payments (as-is) ----------------
 app.post("/api/create-payment", async (req, res) => {
     try {
         const { amount, currency } = req.body;
-        console.log("Incoming body:", req.body);
-
-        // ✅ Use /v1/invoice instead of /v1/payment
         const response = await axios.post(
             "https://api.nowpayments.io/v1/invoice",
             {
                 price_amount: amount,
                 price_currency: currency,
-                pay_currency: "icx", // coin of choice
+                pay_currency: "icx",
                 order_id: "order_" + Date.now(),
                 order_description: "Payment via NOWPayments",
                 ipn_callback_url: "http://localhost:3001/api/payment-webhook",
@@ -137,20 +221,16 @@ app.post("/api/create-payment", async (req, res) => {
             }
         );
 
-        console.log("NOWPayments Invoice Response:", response.data);
-
-        // ✅ Save in DB
         const newPayment = new Payment({
             orderId: response.data.order_id,
             amount: response.data.price_amount,
             currency: response.data.price_currency,
             payCurrency: response.data.pay_currency,
             paymentStatus: response.data.payment_status,
-            paymentId: response.data.id, // invoice id
+            paymentId: response.data.id,
         });
         await newPayment.save();
 
-        // ✅ Return hosted checkout link
         res.json({
             payment_url: response.data.invoice_url,
             orderId: response.data.order_id,
@@ -164,100 +244,12 @@ app.post("/api/create-payment", async (req, res) => {
     }
 });
 
-// ✅ Webhook listener
-app.post("/api/create-payment", async (req, res) => {
-    try {
-        const { ip, amount, currency } = req.body;
-        console.log("Incoming body:", req.body);
-
-        // 🔹 Step 1: Check if user is banned
-        const ban = await Ban.findOne({ ip }).sort({ createdAt: -1 });
-        if (!ban) {
-            return res.status(400).json({ error: "User is not banned" });
-        }
-
-        // 🔹 Step 2: Create invoice on NOWPayments
-        const response = await axios.post(
-            "https://api.nowpayments.io/v1/invoice",
-            {
-                price_amount: amount || 5, // 💲 Default 5 USD to unban
-                price_currency: currency || "usd",
-                pay_currency: "icx", // fixed coin of choice
-                order_id: "ban_" + Date.now(),
-                order_description: "Ban removal fee",
-                ipn_callback_url: `${
-                    process.env.BASE_URL || "http://localhost:3001"
-                }/api/payment-webhook`,
-            },
-            {
-                headers: {
-                    "x-api-key": API_KEY,
-                    "Content-Type": "application/json",
-                },
-            }
-        );
-
-        console.log("NOWPayments Invoice Response:", response.data);
-
-        // 🔹 Step 3: Update ban document with payment details
-        ban.paymentRequired = true;
-        ban.paymentOrderId = response.data.order_id;
-        ban.paymentUrl = response.data.invoice_url;
-        ban.paymentStatus = response.data.payment_status; // "waiting"
-        await ban.save();
-
-        // 🔹 Step 4: Also log payment in Payment collection
-        const newPayment = new Payment({
-            orderId: response.data.order_id,
-            amount: response.data.price_amount,
-            currency: response.data.price_currency,
-            payCurrency: response.data.pay_currency,
-            paymentStatus: response.data.payment_status,
-            paymentId: response.data.id, // invoice id
-            ip, // 👈 so we can link payment to user ban
-        });
-        await newPayment.save();
-
-        // 🔹 Step 5: Return hosted checkout link to frontend
-        res.json({
-            payment_url: response.data.invoice_url,
-            orderId: response.data.order_id,
-            banReason: ban.reason,
-            snapshot: ban.snapshotBase64 || null,
-        });
-    } catch (error) {
-        console.error(
-            "Create Invoice Error:",
-            error.response?.data || error.message
-        );
-        res.status(500).json({ error: "Payment creation failed" });
-    }
-});
-
-app.post("/api/payment-cancel", async (req, res) => {
-    const { ip } = req.body;
-    const ban = await Ban.findOne({ ip, paymentRequired: true });
-    if (!ban) return res.status(404).json({ error: "No active ban" });
-
-    ban.paymentStatus = "cancelled";
-    ban.paymentOrderId = null;
-    ban.paymentUrl = null;
-    await ban.save();
-
-    res.json({ message: "Payment cancelled, user can retry" });
-});
-
-// ✅ Payment Status check
 app.get("/api/payment-status/:orderId", async (req, res) => {
     try {
         const { orderId } = req.params;
-
         const payment = await Payment.findOne({ orderId });
-
-        if (!payment) {
+        if (!payment)
             return res.status(404).json({ error: "Payment not found" });
-        }
-
         res.json({
             orderId: payment.orderId,
             amount: payment.amount,
@@ -274,11 +266,8 @@ app.get("/api/payment-status/:orderId", async (req, res) => {
     }
 });
 
-// -------------------- Admin API: reports, ban control --------------------
-// ================== ADMIN: BANS & REPORTS SYNCED ==================
-
-// Get all reports (admin) – (same as yours)
-app.get("/admin/reports", adminAuth, async (req, res) => {
+// ---------------- Admin: Reports & Bans ----------------
+app.get("/admin/reports", adminAuth, async (_req, res) => {
     try {
         const reports = await Report.find().sort({ createdAt: -1 });
         res.json(reports);
@@ -288,26 +277,42 @@ app.get("/admin/reports", adminAuth, async (req, res) => {
     }
 });
 
-// Ban user (create active ban) + mark reports as 'banned'
+// List users for admin
+app.get("/admin/users", adminAuth, async (req, res) => {
+    const q = (req.query.q || "").toString().trim();
+    const filter = q
+        ? { $or: [{ email: new RegExp(q, "i") }, { name: new RegExp(q, "i") }] }
+        : {};
+    const users = await User.find(filter).sort({ lastLoginAt: -1 }).limit(500);
+    res.json(users);
+});
+
+// Ban by ip OR email
 app.post("/admin/ban-user", adminAuth, async (req, res) => {
     try {
-        const { ip, durationMs, reason } = req.body;
-        const banDuration = durationMs || 10 * 60 * 1000;
+        const { ip, email, durationMs, reason } = req.body;
+        if (!ip && !email)
+            return res.status(400).json({ error: "ip or email required" });
+
+        const banDuration = Math.max(1, durationMs || 10 * 60 * 1000);
         const expiry = new Date(Date.now() + banDuration);
 
         const ban = new Ban({
-            ip,
+            ip: ip || undefined,
+            email: email || undefined,
             reason: reason || "Manual admin ban",
             expiry,
             status: "active",
         });
         await ban.save();
 
-        // optional: mark related reports as 'banned'
-        await Report.updateMany(
-            { accusedIp: ip, status: { $ne: "banned" } },
-            { status: "banned" }
-        );
+        // Mark related reports as banned (IP-only link available by default)
+        if (ip) {
+            await Report.updateMany(
+                { accusedIp: ip, status: { $ne: "banned" } },
+                { status: "banned" }
+            );
+        }
 
         res.json({ message: "User banned successfully", ban });
     } catch (err) {
@@ -316,18 +321,20 @@ app.post("/admin/ban-user", adminAuth, async (req, res) => {
     }
 });
 
-// Unban user (by ip OR banId) – also CLOSE related reports
+// Unban by id OR email OR ip
 app.post("/admin/unban-user", adminAuth, async (req, res) => {
     try {
-        const { ip, banId } = req.body;
-        let ban;
-        if (banId) {
-            ban = await Ban.findById(banId);
-        } else if (ip) {
+        const { ip, email, banId } = req.body;
+        let ban = null;
+        if (banId) ban = await Ban.findById(banId);
+        if (!ban && email)
+            ban = await Ban.findOne({ email, status: "active" }).sort({
+                createdAt: -1,
+            });
+        if (!ban && ip)
             ban = await Ban.findOne({ ip, status: "active" }).sort({
                 createdAt: -1,
             });
-        }
         if (!ban)
             return res.status(404).json({ error: "Active ban not found" });
 
@@ -336,142 +343,22 @@ app.post("/admin/unban-user", adminAuth, async (req, res) => {
         if (ban.expiry > new Date()) ban.expiry = new Date(Date.now() - 1000);
         await ban.save();
 
-        // ⬇️ close all related reports for that IP
-        await Report.updateMany(
-            { accusedIp: ban.ip, status: { $ne: "closed" } },
-            { status: "closed" }
-        );
+        // Close related reports by ip
+        if (ban.ip) {
+            await Report.updateMany(
+                { accusedIp: ban.ip, status: { $ne: "closed" } },
+                { status: "closed" }
+            );
+        }
 
-        return res.json({ message: "User unbanned", ban });
+        res.json({ message: "User unbanned", ban });
     } catch (err) {
         console.error("Admin unban error:", err);
         res.status(500).json({ error: "Failed to unban user" });
     }
 });
 
-// Close ban (body banId) – also CLOSE related reports
-app.post("/admin/close-ban", adminAuth, async (req, res) => {
-    try {
-        const { banId } = req.body;
-        if (!banId) return res.status(400).json({ error: "banId required" });
-        const ban = await Ban.findById(banId);
-        if (!ban) return res.status(404).json({ error: "Ban not found" });
-        if (ban.status === "closed") {
-            // still make sure reports are closed
-            await Report.updateMany(
-                { accusedIp: ban.ip, status: { $ne: "closed" } },
-                { status: "closed" }
-            );
-            return res.json({ message: "Already closed", ban });
-        }
-
-        ban.status = "closed";
-        ban.closedAt = new Date();
-        if (ban.expiry > new Date()) ban.expiry = new Date(Date.now() - 1000);
-        await ban.save();
-
-        // ⬇️ close related reports
-        await Report.updateMany(
-            { accusedIp: ban.ip, status: { $ne: "closed" } },
-            { status: "closed" }
-        );
-
-        res.json({ message: "Ban closed", ban });
-    } catch (err) {
-        console.error("Close ban error:", err);
-        res.status(500).json({ error: "Failed to close ban" });
-    }
-});
-
-// NEW: Unban by ID (matches frontend /admin/unban/:id)
-app.post("/admin/unban/:id", adminAuth, async (req, res) => {
-    try {
-        const { id } = req.params;
-        const ban = await Ban.findById(id);
-        if (!ban) return res.status(404).json({ error: "Ban not found" });
-
-        ban.status = "closed";
-        ban.closedAt = new Date();
-        if (ban.expiry > new Date()) ban.expiry = new Date(Date.now() - 1000);
-        await ban.save();
-
-        await Report.updateMany(
-            { accusedIp: ban.ip, status: { $ne: "closed" } },
-            { status: "closed" }
-        );
-
-        res.json({ ok: true, ban });
-    } catch (e) {
-        console.error("Unban by id error:", e);
-        res.status(500).json({ error: "Failed to unban (id)" });
-    }
-});
-
-// NEW: Unban by IP (matches frontend /admin/unban-by-ip)
-app.post("/admin/unban-by-ip", adminAuth, async (req, res) => {
-    try {
-        const { ip } = req.body;
-        if (!ip) return res.status(400).json({ error: "ip required" });
-
-        const upd = await Ban.updateMany(
-            { ip, status: "active" },
-            {
-                status: "closed",
-                closedAt: new Date(),
-                expiry: new Date(Date.now() - 1000),
-            }
-        );
-
-        await Report.updateMany(
-            { accusedIp: ip, status: { $ne: "closed" } },
-            { status: "closed" }
-        );
-
-        res.json({ ok: true, updated: upd.modifiedCount });
-    } catch (e) {
-        console.error("Unban by ip error:", e);
-        res.status(500).json({ error: "Failed to unban (ip)" });
-    }
-});
-
-// NEW: Close ban by ID (matches frontend /admin/close-ban/:id)
-app.post("/admin/close-ban/:id", adminAuth, async (req, res) => {
-    try {
-        const { id } = req.params;
-        const ban = await Ban.findById(id);
-        if (!ban) return res.status(404).json({ error: "Ban not found" });
-
-        ban.status = "closed";
-        ban.closedAt = new Date();
-        if (ban.expiry > new Date()) ban.expiry = new Date(Date.now() - 1000);
-        await ban.save();
-
-        await Report.updateMany(
-            { accusedIp: ban.ip, status: { $ne: "closed" } },
-            { status: "closed" }
-        );
-
-        res.json({ ok: true, ban });
-    } catch (e) {
-        console.error("Close ban by id error:", e);
-        res.status(500).json({ error: "Failed to close ban (id)" });
-    }
-});
-
-// List bans (activeOnly supported) – (same as yours)
-app.get("/admin/bans", adminAuth, async (req, res) => {
-    try {
-        const activeOnly = String(req.query.activeOnly || "true") === "true";
-        const q = activeOnly ? { status: "active" } : {};
-        const bans = await Ban.find(q).sort({ createdAt: -1 });
-        res.json(bans);
-    } catch (e) {
-        console.error("Admin bans list error:", e);
-        res.status(500).json({ error: "Failed to fetch bans" });
-    }
-});
-
-// Close report (manual)
+// Close report
 app.post("/admin/close-report", adminAuth, async (req, res) => {
     try {
         const { reportId } = req.body;
@@ -485,16 +372,16 @@ app.post("/admin/close-report", adminAuth, async (req, res) => {
     }
 });
 
-// Resolve report (pending -> reviewed/banned)
+// Resolve report
 app.post("/admin/resolve-report", adminAuth, async (req, res) => {
     try {
         const { reportId, action } = req.body;
         if (!reportId)
             return res.status(400).json({ error: "reportId required" });
-
-        const update = { status: "reviewed" };
-        if (String(action).toLowerCase() === "ban") update.status = "banned";
-
+        const update = {
+            status:
+                String(action).toLowerCase() === "ban" ? "banned" : "reviewed",
+        };
         await Report.findByIdAndUpdate(reportId, update);
         res.json({ message: "Report updated", action: update.status });
     } catch (err) {
@@ -503,55 +390,46 @@ app.post("/admin/resolve-report", adminAuth, async (req, res) => {
     }
 });
 
-// Alias to avoid 404s (backward compat)
-app.post("/admin/report/resolve", adminAuth, async (req, res, next) => {
-    req.url = "/admin/resolve-report";
-    next();
+// List bans
+app.get("/admin/bans", adminAuth, async (req, res) => {
+    try {
+        const activeOnly = String(req.query.activeOnly || "true") === "true";
+        const q = activeOnly ? { status: "active" } : {};
+        const bans = await Ban.find(q).sort({ createdAt: -1 });
+        res.json(bans);
+    } catch (e) {
+        console.error("Admin bans list error:", e);
+        res.status(500).json({ error: "Failed to fetch bans" });
+    }
 });
 
-// -------------------------------------------------------------------------
-
+// ---------------- Socket.io ----------------
 const server = http.createServer(app);
 const io = new IOServer(server, {
-    // cors: {
-    //     origin: [
-    //         "https://loop-chatx.vercel.app",
-    //         "http://localhost:4200",
-    //         "https://strangtexx.onrender.com",
-    //     ],
-    //     methods: ["GET", "POST"],
-    // },
-
-    cors: { origin: "*", methods: ["GET", "POST"] },
+    cors: { origin: true, credentials: true, methods: ["GET", "POST"] },
 });
 
-// Queues
+// Queues & maps
 const queues = { video: [], text: [] };
-
-// Maps
 const partnerOf = new Map();
 const modeOf = new Map();
 const countryOf = new Map();
 const startedAt = new Map();
-const topicsOf = new Map(); // ✅ socket.id -> topics array
+const topicsOf = new Map();
 
-// ✅ Bad words list
-const badWords = ["fuck", "shit", "bitch", "sex", "asshole", "islam"];
+// profanity
+filter.loadDictionary();
+filter.add(["sex", "nude", "xxx", "islam"]);
 
-// ✅ Ban maps
-const badWordCount = new Map(); // ip -> count
-const bannedIPs = new Map(); // ip -> banExpiry timestamp
+// local temp bans for profanity
+const badWordCount = new Map();
+const bannedIPs = new Map();
 
-// ✅ Helper to send online count
 function broadcastOnlineCount() {
     io.emit("online-count", { count: io.sockets.sockets.size });
 }
 
-filter.loadDictionary(); // ✅ load default bad words
-filter.add(["sex", "nude", "xxx", "islam"]); // ✅ extra words if needed
-
-// ✅ Ban check
-function isBanned(ip) {
+function isTempBanned(ip) {
     const expiry = bannedIPs.get(ip);
     if (!expiry) return false;
     if (Date.now() > expiry) {
@@ -595,16 +473,13 @@ function tryMatch(mode) {
         startedAt.set(bId, Date.now());
 
         const initiator = Math.random() < 0.5 ? aId : bId;
-
         const aCountry = countryOf.get(aId) || "UN";
         const bCountry = countryOf.get(bId) || "UN";
 
-        // ✅ Topics match check from topicsOf map
         const aTopics = topicsOf.get(aId) || [];
         const bTopics = topicsOf.get(bId) || [];
         const matchedTopics = aTopics.filter((t) => bTopics.includes(t));
 
-        // ✅ Send partner info with country + matched topics
         a.emit("partner-found", {
             partnerId: bId,
             initiator: initiator === aId,
@@ -630,112 +505,107 @@ function breakPair(socket, notifyEvent) {
     if (partnerId) {
         partnerOf.delete(myId);
         partnerOf.delete(partnerId);
-
-        if (partner && notifyEvent) {
-            partner.emit(notifyEvent);
-        }
+        if (partner && notifyEvent) partner.emit(notifyEvent);
     }
     const mode = modeOf.get(socket.id);
     if (mode) dequeue(mode, socket.id);
 }
 
 io.on("connection", async (socket) => {
-    // ✅ Detect IP (proxy safe)
+    // detect IP
     const ip =
-        socket.handshake.headers["x-forwarded-for"]?.split(",")[0] ||
+        socket.handshake.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
         socket.handshake.address;
 
-    // ✅ Check active ban from DB on connection
-    const activeBan = await getActiveBan(ip);
+    // read cookie & decode for email
+    let emailFromCookie = null;
+    try {
+        const cookieHeader = socket.handshake.headers.cookie || "";
+        const sessionCookie = cookieHeader
+            .split(";")
+            .map((s) => s.trim())
+            .find((s) => s.startsWith("session="));
+        if (sessionCookie) {
+            const token = decodeURIComponent(sessionCookie.split("=")[1]);
+            const decoded = jwt.verify(token, JWT_SECRET);
+            emailFromCookie = decoded?.email || null;
+        }
+    } catch {
+        emailFromCookie = null;
+    }
+
+    // check active ban: email first, fallback IP
+    const activeBan = await getActiveBan({ ip, email: emailFromCookie });
     if (activeBan) {
         socket.emit("banned", {
             reason: activeBan.reason,
             remaining: Math.ceil(
                 (activeBan.expiry.getTime() - Date.now()) / 1000
             ),
-            snapshot: activeBan.snapshotBase64 || null, // 👈 Base64 return
+            snapshot: activeBan.snapshotBase64 || null,
         });
-        return; // ❌ Stop further processing
+        return;
     }
 
-    // ✅ Broadcast new online count
     broadcastOnlineCount();
 
-    // ✅ Geo detect
     const geo = geoip.lookup(ip) || {};
     const country = geo?.country || "UN";
-
     countryOf.set(socket.id, country);
     socket.emit("your-info", { ip, geo });
 
-    // ✅ Partner find with topics
     socket.on("find-partner", ({ mode, topics }) => {
-        if (isBanned(ip)) {
+        if (isTempBanned(ip)) {
             socket.emit("banned", {
                 reason: "You are banned for inappropriate words.",
                 remaining: Math.ceil((bannedIPs.get(ip) - Date.now()) / 1000),
             });
             return;
         }
-
         if (mode !== "video" && mode !== "text") mode = "video";
         breakPair(socket, null);
         enqueue(socket, mode);
-
-        // Save topics
         if (Array.isArray(topics)) {
             topicsOf.set(
                 socket.id,
-                topics.map((t) => t.toLowerCase())
+                topics.map((t) => String(t || "").toLowerCase())
             );
         } else {
             topicsOf.set(socket.id, []);
         }
-
         tryMatch(mode);
     });
 
-    // ✅ WebRTC signaling relay
     socket.on("signal", (payload) => {
         const partner = safePartner(socket.id);
         if (partner) partner.emit("signal", payload);
     });
 
-    // ✅ Messages (with bad word check + ban)
-    // ✅ Messages (with bad word check + ban)
     socket.on("message", async (msg) => {
-        if (isBanned(ip)) {
+        if (isTempBanned(ip)) {
             socket.emit("banned", {
                 reason: "You are banned for inappropriate words.",
                 remaining: Math.ceil((bannedIPs.get(ip) - Date.now()) / 1000),
             });
             return;
         }
-
         const partner = safePartner(socket.id);
         if (!partner) return;
 
-        // Partner IP (logging/storage ke liye)
         const partnerIp =
-            partner.handshake.headers["x-forwarded-for"]?.split(",")[0] ||
+            partner.handshake.headers["x-forwarded-for"]
+                ?.split(",")[0]
+                ?.trim() ||
             partner.handshake.address ||
             null;
 
-        // ✅ Stable room key
         const roomId = [socket.id, partner.id].sort().join("_");
-
-        // Kya yeh msg me bad-word hai?
         const isBad = filter.check(msg);
 
-        // ⚠️ STRIKES: sender ke strikes update
         if (isBad) {
             const count = (badWordCount.get(ip) || 0) + 1;
             badWordCount.set(ip, count);
-
-            // Sender ko warning popup
             socket.emit("bad-word-warning", { text: msg, strikes: count });
-
-            // ✅ Receiver ko bhi message JAYEGA + ek warning ribbon/event
             partner.emit("message", msg);
             partner.emit("warning", {
                 text: msg,
@@ -743,7 +613,6 @@ io.on("connection", async (socket) => {
                 warning: "Disallowed content",
             });
 
-            // ✅ DB me message save (flagged)
             try {
                 await new Message({
                     roomId,
@@ -752,32 +621,25 @@ io.on("connection", async (socket) => {
                     receiverIp: partnerIp,
                     senderSocketId: socket.id,
                     receiverSocketId: partner.id,
-                    flagged: true, // optional field (agar schema me ho)
-                    reported: false, // cleaner se bachane ke liye jab tak report na ho
+                    flagged: true,
+                    reported: false,
                 }).save();
             } catch (e) {
                 console.error("Message save error (flagged):", e);
             }
 
-            // 2 strikes -> temp ban (ya jo threshold chaho)
             if (count >= 2) {
-                const banTime = 60 * 1000; // 1 min
+                const banTime = 60 * 1000;
                 bannedIPs.set(ip, Date.now() + banTime);
                 socket.emit("banned", {
                     reason: "You are banned for inappropriate text.",
                     remaining: Math.ceil(banTime / 1000),
                 });
             }
-
-            // Note: yahin return nahi kar rahe — upar message/ warning already send ho chuka hai
             return;
         }
 
-        // ✅ Clean message flow:
-        // 1) Receiver ko message
         partner.emit("message", msg);
-
-        // 2) DB save
         try {
             await new Message({
                 roomId,
@@ -793,7 +655,6 @@ io.on("connection", async (socket) => {
         }
     });
 
-    // ✅ Reporting by user (roomId-first + disconnect)
     socket.on("report-user", async (data) => {
         try {
             const {
@@ -808,30 +669,24 @@ io.on("connection", async (socket) => {
                 });
                 return;
             }
-
-            // accused ip resolve (admin view ke liye helpful)
             let accusedIp = accIpFromClient || null;
             if (!accusedIp && accusedSocketId) {
                 const accusedSock = io.sockets.sockets.get(accusedSocketId);
                 accusedIp =
-                    accusedSock?.handshake?.headers?.["x-forwarded-for"]?.split(
-                        ","
-                    )[0] ||
+                    accusedSock?.handshake?.headers?.["x-forwarded-for"]
+                        ?.split(",")[0]
+                        ?.trim() ||
                     accusedSock?.handshake?.address ||
                     null;
             }
             if (!accusedIp) accusedIp = "unknown";
 
-            // ✅ Most reliable way: roomId by socket-pair
             const roomId = [socket.id, accusedSocketId]
                 .filter(Boolean)
                 .sort()
                 .join("_");
-
-            // 1st try: by roomId
             let msgs = await Message.find({ roomId }).sort({ createdAt: 1 });
 
-            // Fallbacks: socket-pair ya IP-pair (edge cases)
             if (!msgs.length) {
                 msgs = await Message.find({
                     $or: [
@@ -849,7 +704,6 @@ io.on("connection", async (socket) => {
                 }).sort({ createdAt: 1 });
             }
 
-            // Mark messages reported so auto-cleaner na delete kare
             if (msgs.length) {
                 const ids = msgs.map((m) => m._id);
                 await Message.updateMany(
@@ -858,7 +712,6 @@ io.on("connection", async (socket) => {
                 );
             }
 
-            // Report save
             const report = new Report({
                 reporterIp: ip,
                 accusedIp,
@@ -879,29 +732,17 @@ io.on("connection", async (socket) => {
             socket.emit("report-success", {
                 message: "Report submitted to admin",
             });
-
-            // ✅ Disconnect pair after report
             breakPair(socket, "partner-left");
             socket.emit("self-stopped");
             modeOf.delete(socket.id);
             countryOf.delete(socket.id);
             topicsOf.delete(socket.id);
-
-            console.log(
-                "🚨 Report created:",
-                report._id,
-                "msgs:",
-                msgs.length,
-                "scope:",
-                scope || "current"
-            );
         } catch (err) {
             console.error("Report error:", err);
             socket.emit("report-error", { error: "Failed to submit report" });
         }
     });
 
-    // ✅ Typing indicator
     socket.on("typing", () => {
         const partner = safePartner(socket.id);
         if (partner) partner.emit("typing");
@@ -911,31 +752,26 @@ io.on("connection", async (socket) => {
         if (partner) partner.emit("stop-typing");
     });
 
-    // ✅ Skip
     socket.on("skip", () => {
-        if (isBanned(ip)) {
+        if (isTempBanned(ip)) {
             socket.emit("banned", {
                 reason: "You are banned for inappropriate words.",
                 remaining: Math.ceil((bannedIPs.get(ip) - Date.now()) / 1000),
             });
             return;
         }
-
         const mode = modeOf.get(socket.id) || "video";
         breakPair(socket, "partner-left");
         enqueue(socket, mode);
         tryMatch(mode);
     });
 
-    // ✅ Stop
     socket.on("stop", () => {
         const partner = safePartner(socket.id);
         const myId = socket.id;
-
         if (partner) {
             partner.emit("partner-stopped");
             socket.emit("self-stopped");
-
             partnerOf.delete(myId);
             partnerOf.delete(partner.id);
             startedAt.delete(myId);
@@ -943,7 +779,6 @@ io.on("connection", async (socket) => {
         } else {
             socket.emit("self-stopped");
         }
-
         modeOf.delete(myId);
         countryOf.delete(myId);
         topicsOf.delete(myId);
@@ -957,72 +792,31 @@ io.on("connection", async (socket) => {
         broadcastOnlineCount();
     });
 
-    // ✅ Manual ban trigger
+    // Manual ban trigger (kept for compatibility)
     socket.on("banned", async (data) => {
         const duration = 10 * 60 * 1000;
         const expiry = new Date(Date.now() + duration);
-
         const banDoc = new Ban({
             ip,
             reason: data?.reason || "Inappropriate video content",
             expiry,
             snapshotBase64: data?.snapshot || null,
+            status: "active",
         });
         await banDoc.save();
-
         socket.emit("banned", {
             reason: banDoc.reason,
             remaining: Math.ceil(duration / 1000),
-            paymentUrl: banDoc.paymentUrl, // 👈 show in frontend
+            paymentUrl: banDoc.paymentUrl,
             snapshot: banDoc.snapshotBase64 || null,
         });
-
         console.log("🚫 User banned manually:", ip);
-    });
-
-    // ✅ Snapshot folder ensure
-    const SNAPSHOT_DIR = path.join(process.cwd(), "snapshots");
-    if (!fs.existsSync(SNAPSHOT_DIR)) fs.mkdirSync(SNAPSHOT_DIR);
-
-    // ✅ NSFW report
-    socket.on("report-nsfw", async (data) => {
-        try {
-            const duration = 60 * 1000; // 1 min ban
-            const expiry = new Date(Date.now() + duration);
-
-            let snapshotBase64 = null;
-            if (data?.snapshot) {
-                snapshotBase64 = data.snapshot; // 👈 Base64 direct store
-            }
-
-            const banDoc = new Ban({
-                ip,
-                reason: data?.reason || "Nudity detected",
-                expiry,
-                snapshotBase64, // 👈 store base64 instead of file path
-            });
-            await banDoc.save();
-
-            // ❌ Immediately disconnect from partner
-            breakPair(socket, "partner-left");
-
-            socket.emit("banned", {
-                reason: banDoc.reason,
-                remaining: Math.ceil((expiry.getTime() - Date.now()) / 1000),
-                paymentUrl: banDoc.paymentUrl, // 👈 show in frontend
-                snapshot: snapshotBase64 || null, // 👈 send base64 back to frontend
-            });
-
-            console.log("🚫 NSFW ban saved:", banDoc._id);
-        } catch (err) {
-            console.error("❌ Ban save error:", err);
-        }
     });
 });
 
+// ---------------- Housekeeping ----------------
 const PORT = process.env.PORT || 3001;
 
-// -------------------- Auto-cleaner: delete non-reported messages older than 1 hour --------------------
 setInterval(async () => {
     try {
         const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
@@ -1038,9 +832,61 @@ setInterval(async () => {
         console.error("Auto-cleaner error:", err);
     }
 }, 10 * 60 * 1000);
-// -------------------------------------------------------------------------
 
 server.listen(PORT, () => {
     console.log("✅ Signaling server listening on", PORT);
     console.log("🚀 Current App Version:", appVersion);
+});
+
+// --- Email-based ban/unban for logged-in users ---
+app.post("/admin/ban-user-email", adminAuth, async (req, res) => {
+    try {
+        const { email, durationMs, reason } = req.body;
+        if (!email) return res.status(400).json({ error: "email required" });
+        const banDuration = durationMs || 10 * 60 * 1000;
+        const expiry = new Date(Date.now() + banDuration);
+        const ban = new Ban({
+            email,
+            ip: "email-ban",
+            reason: reason || "Manual admin ban (email)",
+            expiry,
+            status: "active",
+        });
+        await ban.save();
+        // optional: mark reports (if any) by accusedIp not possible via email; skip or extend schema
+        res.json({ message: "User banned by email", ban });
+    } catch (err) {
+        console.error("Admin ban by email error:", err);
+        res.status(500).json({ error: "Failed to ban by email" });
+    }
+});
+
+app.post("/admin/unban-user-email", adminAuth, async (req, res) => {
+    try {
+        const { email } = req.body;
+        if (!email) return res.status(400).json({ error: "email required" });
+        const upd = await Ban.updateMany(
+            { email, status: "active" },
+            {
+                status: "closed",
+                closedAt: new Date(),
+                expiry: new Date(Date.now() - 1000),
+            }
+        );
+        res.json({ message: "Unbanned by email", updated: upd.modifiedCount });
+    } catch (err) {
+        console.error("Admin unban by email error:", err);
+        res.status(500).json({ error: "Failed to unban by email" });
+    }
+});
+
+// --- Admin users list ---
+app.get("/admin/users", adminAuth, async (_req, res) => {
+    try {
+        const users = await User.find({}).sort({ createdAt: -1 }).limit(500);
+        res.json(users);
+    } catch (e) {
+        console.error("Admin users list error:", e);
+        res.status(500).json({ error: "Failed to fetch users" });
+    }
 });
