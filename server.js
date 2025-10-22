@@ -176,10 +176,11 @@ app.post("/auth/google", async (req, res) => {
             JWT_SECRET,
             { expiresIn: "7d" }
         );
+        // inside /auth/google after jwt.sign(...)
         res.cookie("session", token, {
             httpOnly: true,
-            sameSite: "lax",
-            secure: process.env.NODE_ENV === "production",
+            sameSite: "None", // cross-site allowed
+            secure: process.env.NODE_ENV === "production", // true on HTTPS
             maxAge: 7 * 24 * 60 * 60 * 1000,
         });
         res.json({ ok: true, profile: { email, name, picture } });
@@ -405,10 +406,19 @@ app.get("/admin/bans", adminAuth, async (req, res) => {
 
 // ---------------- Socket.io ----------------
 const server = http.createServer(app);
-const io = new IOServer(server, {
-    cors: { origin: true, credentials: true, methods: ["GET", "POST"] },
-});
+// ✅ list your frontend URLs here
+const allowedOrigins = [
+    "http://localhost:4200", // Angular dev
+    "https://loop-chatx.vercel.app", // add any custom domain you use
+];
 
+const io = new IOServer(server, {
+    cors: {
+        origin: allowedOrigins,
+        credentials: true, // required for cookies or auth headers
+        methods: ["GET", "POST"],
+    },
+});
 // Queues & maps
 const queues = { video: [], text: [] };
 const partnerOf = new Map();
