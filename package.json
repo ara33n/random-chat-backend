@@ -1,25 +1,29 @@
 {
-    "name": "random-chat-backend",
-    "version": "1.1.1",
-    "type": "module",
-    "main": "server.js",
-    "scripts": {
-        "start": "node server.js",
-        "dev": "node server.js",
-        "version:patch": "npm version patch && npm run start",
-        "version:minor": "npm version minor && npm run start",
-        "version:major": "npm version major && npm run start"
-    },
-    "dependencies": {
-        "axios": "^1.12.2",
-        "cookie-parser": "^1.4.7",
-        "cors": "^2.8.5",
-        "express": "^4.21.2",
-        "geoip-lite": "^1.4.10",
-        "google-auth-library": "^10.4.1",
-        "jsonwebtoken": "^9.0.2",
-        "leo-profanity": "^1.8.0",
-        "mongoose": "^8.18.1",
-        "socket.io": "^4.7.5"
-    }
+  "name": "random-chat-backend",
+  "version": "1.1.1",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "version:patch": "npm version patch && npm run start",
+    "version:minor": "npm version minor && npm run start",
+    "version:major": "npm version major && npm run start",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "axios": "^1.12.2",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "geoip-lite": "^1.4.10",
+    "leo-profanity": "^1.8.0",
+    "mongoose": "^8.18.1",
+    "socket.io": "^4.7.5"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.4"
+  },
+  "engines": {
+    "node": "24.x"
+  }
 }

@@ -2,9 +2,6 @@ import express from "express";
 import http from "http";
 import cors from "cors";
 import axios from "axios";
-import cookieParser from "cookie-parser";
-import jwt from "jsonwebtoken";
-import { OAuth2Client } from "google-auth-library";
 import { Server as IOServer } from "socket.io";
 import geoip from "geoip-lite";
 import fs from "fs";
@@ -20,26 +17,31 @@ import Report from "./models/Report.js";
 // === New user model ===
 import User from "./models/User.js";
 
+// Load local development configuration; hosted environment variables take precedence.
+if (fs.existsSync('.env')) process.loadEnvFile('.env');
+
+const allowedOrigins = (process.env.FRONTEND_ORIGINS ||
+    'http://localhost:4200,https://loop-chatx.vercel.app')
+    .split(',').map(origin => origin.trim().replace(/\/$/, '')).filter(Boolean);
+const corsOptions = { origin: allowedOrigins, credentials: true, methods: ['GET', 'POST', 'OPTIONS'] };
+
 // ---------------- App & DB ----------------
 const app = express();
-app.use(cors({ origin: true, credentials: true }));
+app.use(cors(corsOptions));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(cookieParser());
 
 mongoose
-    .connect(process.env.MONGO_URI || "mongodb://127.0.0.1:27017/chatapp")
+    .connect(process.env.MONGO_URI || "mongodb://127.0.0.1:27017/chatapp", { serverSelectionTimeoutMS: 5000, bufferCommands: false })
     .then(() => console.log("✅ MongoDB connected"))
-    .catch((err) => console.error("❌ MongoDB connect error:", err));
+    .catch((err) => {
+        console.error('MongoDB connection failed:', err.name, err.code || 'unavailable');
+        // Exit so the host can restart the service instead of serving broken chat indefinitely.
+        process.exit(1);
+    });
 
 // ---------------- Env & Constants ----------------
 const API_KEY = process.env.NOWPAY_API_KEY || "YYB93M2-WBMM0HH-N17825T-ERPG0QN";
-const GOOGLE_CLIENT_ID =
-    process.env.GOOGLE_CLIENT_ID ||
-    "997739380757-jluek15p8cbm80ut04fibbkl9jr6ofno.apps.googleusercontent.com";
-const JWT_SECRET = process.env.JWT_SECRET || "change_me_in_prod";
-const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
-
 // ---------------- Ban Schema (extended) ----------------
 const banSchema = new mongoose.Schema({
     ip: { type: String },
@@ -115,6 +117,15 @@ function adminAuth(req, res, next) {
 app.get("/", (req, res) =>
     res.json({ ok: true, message: "Random Chat Signaling Server running." })
 );
+app.get('/health', async (_req, res) => {
+    try {
+        if (mongoose.connection.readyState !== 1) throw new Error('unavailable');
+        await mongoose.connection.db.admin().command({ ping: 1 }, { timeoutMS: 3000 });
+        res.json({ ok: true, database: 'connected' });
+    } catch {
+        res.status(503).json({ ok: false, database: 'unavailable' });
+    }
+});
 app.get("/version", (req, res) => res.json({ version: appVersion }));
 app.get("/check-outbound-ip", async (_req, res) => {
     try {
@@ -123,81 +134,6 @@ app.get("/check-outbound-ip", async (_req, res) => {
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
-});
-
-// ---------------- Google Auth ----------------
-function authOptional(req, _res, next) {
-    const raw = req.cookies?.session;
-    if (raw) {
-        try {
-            req.user = jwt.verify(raw, JWT_SECRET);
-        } catch {
-            req.user = null;
-        }
-    }
-    next();
-}
-
-app.post("/auth/google", async (req, res) => {
-    try {
-        const { idToken } = req.body;
-        if (!idToken)
-            return res.status(400).json({ error: "idToken required" });
-
-        const ticket = await googleClient.verifyIdToken({
-            idToken,
-            audience: GOOGLE_CLIENT_ID,
-        });
-        const payload = ticket.getPayload();
-        if (!payload?.sub || !payload?.email) {
-            return res.status(401).json({ error: "Invalid Google token" });
-        }
-
-        const googleId = payload.sub;
-        const email = payload.email;
-        const name = payload.name || "";
-        const picture = payload.picture || "";
-
-        // Upsert user
-        const now = new Date();
-        const user = await User.findOneAndUpdate(
-            { googleId },
-            {
-                $set: { email, name, picture },
-                $inc: { loginCount: 1 },
-                $setOnInsert: { createdAt: now },
-                lastLoginAt: now,
-            },
-            { upsert: true, new: true }
-        );
-
-        const token = jwt.sign(
-            { uid: googleId, email, name, picture },
-            JWT_SECRET,
-            { expiresIn: "7d" }
-        );
-        // inside /auth/google after jwt.sign(...)
-        res.cookie("session", token, {
-            httpOnly: true,
-            sameSite: "None", // cross-site allowed
-            secure: process.env.NODE_ENV === "production", // true on HTTPS
-            maxAge: 7 * 24 * 60 * 60 * 1000,
-        });
-        res.json({ ok: true, profile: { email, name, picture } });
-    } catch (e) {
-        console.error("Google auth error:", e);
-        res.status(401).json({ error: "Invalid Google token" });
-    }
-});
-
-app.post("/auth/logout", (_req, res) => {
-    res.clearCookie("session", { httpOnly: true, sameSite: "lax" });
-    res.json({ ok: true });
-});
-
-app.get("/auth/me", authOptional, (req, res) => {
-    if (!req.user) return res.json({ ok: false });
-    res.json({ ok: true, user: req.user });
 });
 
 // ---------------- Payments (as-is) ----------------
@@ -406,18 +342,29 @@ app.get("/admin/bans", adminAuth, async (req, res) => {
 
 // ---------------- Socket.io ----------------
 const server = http.createServer(app);
-// ✅ list your frontend URLs here
-const allowedOrigins = [
-    "http://localhost:4200", // Angular dev
-    "https://loop-chatx.vercel.app", // add any custom domain you use
-];
+const io = new IOServer(server, { cors: corsOptions });
 
-const io = new IOServer(server, {
-    cors: {
-        origin: allowedOrigins,
-        credentials: true, // required for cookies or auth headers
-        methods: ["GET", "POST"],
-    },
+// Finish the database-backed access check before accepting the socket.
+// Otherwise an early find-partner event can arrive before its listener exists.
+io.use(async (socket, next) => {
+    const ip = socket.handshake.headers['x-forwarded-for']?.split(',')[0]?.trim()
+        || socket.handshake.address;
+    socket.data.ip = ip;
+    try {
+        if (mongoose.connection.readyState !== 1) throw new Error('database unavailable');
+        const activeBan = await getActiveBan({ ip });
+        if (activeBan) {
+            const error = new Error('BANNED');
+            error.data = { reason: activeBan.reason, remaining: Math.ceil((activeBan.expiry.getTime() - Date.now()) / 1000) };
+            return next(error);
+        }
+        next();
+    } catch (error) {
+        console.error('Socket access check failed:', error.name);
+        const unavailable = new Error('DATABASE_UNAVAILABLE');
+        unavailable.data = { retryable: true };
+        next(unavailable);
+    }
 });
 // Queues & maps
 const queues = { video: [], text: [] };
@@ -475,7 +422,11 @@ function tryMatch(mode) {
         const bId = list.shift();
         const a = io.sockets.sockets.get(aId);
         const b = io.sockets.sockets.get(bId);
-        if (!a || !b) continue;
+        if (!a || !b) {
+            if (a) list.unshift(aId);
+            if (b) list.unshift(bId);
+            continue;
+        }
 
         partnerOf.set(aId, bId);
         partnerOf.set(bId, aId);
@@ -521,42 +472,8 @@ function breakPair(socket, notifyEvent) {
     if (mode) dequeue(mode, socket.id);
 }
 
-io.on("connection", async (socket) => {
-    // detect IP
-    const ip =
-        socket.handshake.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
-        socket.handshake.address;
-
-    // read cookie & decode for email
-    let emailFromCookie = null;
-    try {
-        const cookieHeader = socket.handshake.headers.cookie || "";
-        const sessionCookie = cookieHeader
-            .split(";")
-            .map((s) => s.trim())
-            .find((s) => s.startsWith("session="));
-        if (sessionCookie) {
-            const token = decodeURIComponent(sessionCookie.split("=")[1]);
-            const decoded = jwt.verify(token, JWT_SECRET);
-            emailFromCookie = decoded?.email || null;
-        }
-    } catch {
-        emailFromCookie = null;
-    }
-
-    // check active ban: email first, fallback IP
-    const activeBan = await getActiveBan({ ip, email: emailFromCookie });
-    if (activeBan) {
-        socket.emit("banned", {
-            reason: activeBan.reason,
-            remaining: Math.ceil(
-                (activeBan.expiry.getTime() - Date.now()) / 1000
-            ),
-            snapshot: activeBan.snapshotBase64 || null,
-        });
-        return;
-    }
-
+io.on("connection", (socket) => {
+    const ip = socket.data.ip;
     broadcastOnlineCount();
 
     const geo = geoip.lookup(ip) || {};
@@ -564,7 +481,7 @@ io.on("connection", async (socket) => {
     countryOf.set(socket.id, country);
     socket.emit("your-info", { ip, geo });
 
-    socket.on("find-partner", ({ mode, topics }) => {
+    socket.on("find-partner", ({ mode, topics } = {}) => {
         if (isTempBanned(ip)) {
             socket.emit("banned", {
                 reason: "You are banned for inappropriate words.",
@@ -573,7 +490,7 @@ io.on("connection", async (socket) => {
             return;
         }
         if (mode !== "video" && mode !== "text") mode = "video";
-        breakPair(socket, null);
+        breakPair(socket, "partner-left");
         enqueue(socket, mode);
         if (Array.isArray(topics)) {
             topicsOf.set(
@@ -592,6 +509,7 @@ io.on("connection", async (socket) => {
     });
 
     socket.on("message", async (msg) => {
+        if (typeof msg !== "string" || !msg.trim() || msg.length > 4000) return;
         if (isTempBanned(ip)) {
             socket.emit("banned", {
                 reason: "You are banned for inappropriate words.",
@@ -777,6 +695,8 @@ io.on("connection", async (socket) => {
     });
 
     socket.on("stop", () => {
+        const queuedMode = modeOf.get(socket.id);
+        if (queuedMode) dequeue(queuedMode, socket.id);
         const partner = safePartner(socket.id);
         const myId = socket.id;
         if (partner) {
