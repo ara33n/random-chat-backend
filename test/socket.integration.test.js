@@ -161,7 +161,7 @@ test('signed Paddle fulfillment closes only its paid ban and is idempotent', asy
  const first=await bans.insertOne({ip,reason:'paid test ban',status:'active',expiry:new Date(Date.now()+60000)});
  const second=await bans.insertOne({ip,reason:'later ban',status:'active',expiry:new Date(Date.now()+60000)});
  const orderId='integration-paddle-order';
- await mongoose.connection.collection('unbanpayments').insertOne({orderId,banId:first.insertedId,ip,priceId:'pri_test',transactionId:'txn_test',status:'pending'});
+ await mongoose.connection.collection('unbanpayments').insertOne({orderId,banId:first.insertedId,ip,priceId:'pri_test',transactionId:'txn_test',status:'pending',environment:'sandbox'});
  const data={currency_code:'USD',details:{totals:{grand_total:'1250'}},id:'txn_test',status:'completed',custom_data:{order_id:orderId},items:[{quantity:1,price:{id:'pri_test',billing_cycle:null}}]};
  async function send(body,valid=true){
    const ts=String(Math.floor(Date.now()/1000));
@@ -170,6 +170,10 @@ test('signed Paddle fulfillment closes only its paid ban and is idempotent', asy
  }
  const body=JSON.stringify({event_type:'transaction.completed',data});
  assert.equal((await send(body,false)).status,400);
+ await mongoose.connection.collection('unbanpayments').updateOne({orderId},{$set:{environment:'production'}});
+ assert.equal((await send(body)).status,400);
+ assert.equal((await bans.findOne({_id:first.insertedId})).status,'active');
+ await mongoose.connection.collection('unbanpayments').updateOne({orderId},{$set:{environment:'sandbox'}});
  assert.equal((await bans.findOne({_id:first.insertedId})).status,'active');
  assert.equal((await send(JSON.stringify({event_type:'transaction.completed',data:{...data,id:'txn_wrong'}}))).status,400);
  assert.equal((await send(body)).status,200);

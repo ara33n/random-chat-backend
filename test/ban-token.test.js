@@ -14,9 +14,9 @@ test('ban references are signed, expire and reject tampering',()=>{
 });
 test('checkout and payment status use the signed ban even if the HTTP IP changes',async()=>{
  const old={...process.env};
- process.env.PADDLE_API_KEY='test-api';process.env.PADDLE_WEBHOOK_SECRET=secret;process.env.PADDLE_UNBAN_PRICE_ID='pri_test';
+ process.env.PADDLE_API_KEY='test-api';process.env.PADDLE_WEBHOOK_SECRET=secret;process.env.PADDLE_UNBAN_PRICE_ID='pri_01m429f20x3bj3nr3qkp99f1t0';
  const token=createBanToken(ban,secret);
- const existing={orderId:'test-order',priceId:'pri_test',transactionId:'txn_test',status:'pending'};
+ const existing={orderId:'test-order',priceId:'pri_01m429f20x3bj3nr3qkp99f1t0',transactionId:'txn_test',status:'pending',environment:'sandbox'};
  const init=mock.method(UnbanPayment,'init',async()=>{});
  const find=mock.method(UnbanPayment,'findOne',async query=>{assert.equal(String(query.banId),ban._id);assert.equal(query.ip,undefined);return existing;});
  let activeBan=ban;

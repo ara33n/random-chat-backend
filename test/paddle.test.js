@@ -14,8 +14,8 @@ test('Paddle signatures require original body, matching secret and recent timest
  assert.equal(verifySignature(raw,'ts=bad;h1=bad',secret),false);
 });
 test('only the exact completed one-time transaction is eligible',()=>{
- const payment={transactionId:'txn_test',orderId:'order-test',priceId:'pri_test'};
- const data={id:'txn_test',status:'completed',custom_data:{order_id:'order-test'},items:[{quantity:1,price:{id:'pri_test',billing_cycle:null}}]};
+ const payment={transactionId:'txn_test',orderId:'order-test',priceId:'pri_01m429f20x3bj3nr3qkp99f1t0'};
+ const data={id:'txn_test',status:'completed',custom_data:{order_id:'order-test'},items:[{quantity:1,price:{id:'pri_01m429f20x3bj3nr3qkp99f1t0',billing_cycle:null}}]};
  assert.equal(isExpectedTransaction(data,payment),true);
  for(const change of [{id:'txn_other'},{status:'paid'},{subscription_id:'sub_test'},{custom_data:{order_id:'other'}},{items:[{quantity:1,price:{id:'pri_other'}}]}]) assert.equal(isExpectedTransaction({...data,...change},payment),false);
 });
@@ -23,6 +23,6 @@ test('only the exact completed one-time transaction is eligible',()=>{
 
 test('Paddle readiness identifies missing configuration without returning secrets',()=>{
  assert.deepEqual(missingPaddleSettings({}),['PADDLE_API_KEY','PADDLE_WEBHOOK_SECRET','PADDLE_UNBAN_PRICE_ID']);
- assert.deepEqual(missingPaddleSettings({PADDLE_API_KEY:'private',PADDLE_WEBHOOK_SECRET:'secret',PADDLE_UNBAN_PRICE_ID:'pri_test'}),[]);
+ assert.deepEqual(missingPaddleSettings({PADDLE_API_KEY:'private',PADDLE_WEBHOOK_SECRET:'secret',PADDLE_UNBAN_PRICE_ID:'pri_01m429f20x3bj3nr3qkp99f1t0'}),[]);
  assert.deepEqual(missingPaddleSettings({PADDLE_API_KEY:'private',PADDLE_WEBHOOK_SECRET:' ',PADDLE_UNBAN_PRICE_ID:'invalid'}),['PADDLE_WEBHOOK_SECRET','PADDLE_UNBAN_PRICE_ID']);
 });
