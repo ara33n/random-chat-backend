@@ -9,7 +9,7 @@ const schema = new mongoose.Schema({
   banId: { type: mongoose.Schema.Types.ObjectId, required: true, unique: true },
   ip: { type: String, required: true },
   priceId: { type: String, required: true },
-  transactionId: { type: String },
+  transactionId: { type: String, unique: true, sparse: true },
   amountMinor: String,
   currency: String,
   completedAt: Date,
@@ -40,6 +40,11 @@ export function isExpectedTransaction(data, payment) {
     !data.items[0].price?.billing_cycle;
 }
 
+export function isPaidReactivationEligible(ban, now = new Date()) {
+  return Boolean(ban && ban.status === 'active' && ban.reactivationEligible === true &&
+    ban.expiry instanceof Date && ban.expiry > now);
+}
+
 export function missingPaddleSettings(env = process.env) {
   return validatePaddleSettings(env).missing;
 }
@@ -63,12 +68,12 @@ export function paddleHandlers({ getBanModel, getActiveBan, clientIp }) {
         if (req.body?.banToken) {
           const id = readBanToken(req.body.banToken, { allowExpired: true });
           if (!id) return res.status(403).json({ error: 'Invalid checkout reference. Reconnect to refresh your restriction.' });
-          ban = await getBanModel().findOne({ _id: id, status: 'active', expiry: { $gt: new Date() } });
+          ban = await getBanModel().findOne({ _id: id, status: 'active', reactivationEligible: true, expiry: { $gt: new Date() } });
         } else {
           // Compatibility for older clients; new clients use the signed ban reference.
           ban = await getActiveBan({ ip: clientIp(req) });
         }
-        if (!ban) return res.status(409).json({ code: 'BAN_NOT_ACTIVE', error: 'This restriction has expired or was removed. Reconnect to chat; no payment is needed for it.' });
+        if (!ban || !isPaidReactivationEligible(ban)) return res.status(409).json({ code: 'BAN_NOT_ELIGIBLE', error: 'This restriction is not eligible for paid reactivation.' });
         const environment = paddleEnvironment();
         const priceId = paddleSettings().priceId;
         payment = await UnbanPayment.findOne({ banId: ban._id });
@@ -87,7 +92,7 @@ export function paddleHandlers({ getBanModel, getActiveBan, clientIp }) {
           ownsAttempt = Boolean(payment);
         }
         if (!ownsAttempt) {
-          if (payment?.status === 'pending' && payment.transactionId && payment.environment === environment) {
+          if (payment?.status === 'pending' && payment.transactionId && payment.environment === environment && payment.priceId === priceId) {
             return res.json({ orderId: payment.orderId, transactionId: payment.transactionId, priceId: payment.priceId });
           }
           // Never retry an ambiguous POST: Paddle does not promise idempotency keys.
@@ -170,7 +175,7 @@ export function paddleHandlers({ getBanModel, getActiveBan, clientIp }) {
         if (!payment) return res.sendStatus(200);
         // A webhook may race transaction creation; let Paddle retry after the ID is saved.
         if (!payment.transactionId) return res.sendStatus(503);
-        if (payment.environment !== paddleEnvironment() || !isExpectedTransaction(event.data, payment)) {
+        if (payment.environment !== paddleEnvironment() || payment.priceId !== paddleSettings().priceId || !isExpectedTransaction(event.data, payment)) {
           logPaddleError({}, 'webhook.transaction_mismatch');
           return res.sendStatus(400);
         }
@@ -187,9 +192,13 @@ export function paddleHandlers({ getBanModel, getActiveBan, clientIp }) {
           return res.sendStatus(200);
         }
         // Exact ban ID: payment for an old ban must never lift a later restriction.
-        await getBanModel().updateOne({ _id: payment.banId, ip: payment.ip, status: 'active' }, {
+        const release = await getBanModel().updateOne({ _id: payment.banId, ip: payment.ip, status: 'active', reactivationEligible: true, expiry: { $gt: new Date() } }, {
           $set: { status: 'closed', closedAt: new Date(), expiry: new Date(), paymentStatus: 'success', paymentOrderId: payment.orderId },
         });
+        if (release.modifiedCount !== 1) {
+          logPaddleError({}, 'webhook.ban_not_eligible');
+          return res.sendStatus(409);
+        }
         payment.status = 'completed'; await payment.save();
         res.sendStatus(200);
       } catch (error) { logPaddleError(error, 'webhook.fulfillment'); res.sendStatus(503); }

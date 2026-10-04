@@ -1,4 +1,4 @@
-import { test, before, after, mock } from 'node:test';
+import { test, before, beforeEach, after, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import mongoose from 'mongoose';
 import axios from 'axios';
@@ -14,8 +14,9 @@ before(async()=>{
  await mongoose.connect(mongo.replace(/\/$/,'')+'/paddle_checkout_test_'+process.pid);await UnbanPayment.init();
 });
 after(async()=>{await mongoose.connection.dropDatabase();await mongoose.disconnect();});
+beforeEach(async()=>{await UnbanPayment.deleteMany({});});
 function setup(){
- const ban={_id:new mongoose.Types.ObjectId(),ip:'192.0.2.1'};
+ const ban={_id:new mongoose.Types.ObjectId(),ip:'192.0.2.1',status:'active',reactivationEligible:true,expiry:new Date(Date.now()+60000)};
  const handler=paddleHandlers({getBanModel:()=>({}),getActiveBan:async()=>ban,clientIp:()=>ban.ip});
  const request=()=>{const res={statusCode:200,status(code){this.statusCode=code;return this;},json(body){this.body=body;return this;}};return handler.checkout({body:{}},res).then(()=>res);};
  return {ban,request};
@@ -81,6 +82,18 @@ test('price lookup failure never creates a transaction',async()=>{
   const response=await request();assert.equal(response.body.code,'PADDLE_PRICE_LOOKUP_FAILED');assert.equal(response.body.missing,undefined);assert.equal(m.create.mock.callCount(),0);
   assert.equal((await UnbanPayment.findOne({banId:ban._id})).status,'failed');
  }finally{get.mock.restore();m.create.mock.restore();m.log.mock.restore();}
+});
+test('ineligible bans cannot create a Paddle transaction',async()=>{
+ const ban={_id:new mongoose.Types.ObjectId(),ip:'192.0.2.55',status:'active',reactivationEligible:false,expiry:new Date(Date.now()+60000)};
+ const handler=paddleHandlers({getBanModel:()=>({}),getActiveBan:async()=>ban,clientIp:()=>ban.ip});
+ const get=mock.method(axios,'get',async()=>{throw new Error('Paddle must not be called');});
+ const post=mock.method(axios,'post',async()=>{throw new Error('Paddle must not be called');});
+ const res={statusCode:200,status(code){this.statusCode=code;return this;},json(body){this.body=body;return this;}};
+ try {
+  await handler.checkout({body:{}},res);
+  assert.equal(res.statusCode,409);assert.equal(res.body.code,'BAN_NOT_ELIGIBLE');
+  assert.equal(get.mock.callCount(),0);assert.equal(post.mock.callCount(),0);
+ } finally {get.mock.restore();post.mock.restore();}
 });
 test('logs exclude messages, raw data, tokens, credentials and arbitrary headers',()=>{
  const info=safePaddleError({message:'private ban token',code:'ERR_BAD_REQUEST',config:{headers:{Authorization:'test-api-secret'}},response:{status:400,headers:{'request-id':'00000000-0000-0000-0000-000000000000'},data:{error:{code:'transaction_default_checkout_url_not_set',detail:'test-webhook-secret'},secret:'test-api-secret'}}},'checkout.transaction_create');

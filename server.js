@@ -100,6 +100,7 @@ const banSchema = new mongoose.Schema({
     closedAt: { type: Date },
     paymentOrderId: { type: String },
     paymentUrl: { type: String },
+    reactivationEligible: { type: Boolean, default: false },
     createdAt: { type: Date, default: Date.now },
 });
 const Ban = mongoose.model("Ban", banSchema);
@@ -339,7 +340,7 @@ io.use(async (socket, next) => {
         const activeBan = await getActiveBan({ ip });
         if (activeBan) {
             const error = new Error('BANNED');
-            error.data = { paymentEligible: true, banToken: createBanToken(activeBan), expiresAt: activeBan.expiry.toISOString(), reason: activeBan.reason, remaining: Math.ceil((activeBan.expiry.getTime() - Date.now()) / 1000) };
+            error.data = { paymentEligible: activeBan.reactivationEligible === true, ...(activeBan.reactivationEligible === true ? { banToken: createBanToken(activeBan) } : {}), expiresAt: activeBan.expiry.toISOString(), reason: activeBan.reason, remaining: Math.ceil((activeBan.expiry.getTime() - Date.now()) / 1000) };
             return next(error);
         }
         next();
@@ -371,7 +372,7 @@ function disconnectBannedIp(ip, ban) {
         if (socket.data.ip !== ip) continue;
         const partner = io.sockets.sockets.get(partnerOf.get(socket.id));
         partner?.emit('partner-banned');
-        socket.emit('banned', { paymentEligible: true, banToken: createBanToken(ban), expiresAt: ban.expiry.toISOString(), reason: ban.reason, remaining: Math.max(0, Math.ceil((ban.expiry.getTime() - Date.now()) / 1000)) });
+        socket.emit('banned', { paymentEligible: ban.reactivationEligible === true, ...(ban.reactivationEligible === true ? { banToken: createBanToken(ban) } : {}), expiresAt: ban.expiry.toISOString(), reason: ban.reason, remaining: Math.max(0, Math.ceil((ban.expiry.getTime() - Date.now()) / 1000)) });
         socket.disconnect(true);
     }
 }
@@ -584,7 +585,7 @@ io.on("connection", (socket) => {
                 try {
                     const ban = await Ban.create({
                         ip, reason: 'You are banned for inappropriate text.',
-                        expiry: new Date(Date.now() + banTime), status: 'active',
+                        expiry: new Date(Date.now() + banTime), status: 'active', reactivationEligible: true,
                     });
                     bannedIPs.delete(ip);
                     badWordCount.delete(ip);

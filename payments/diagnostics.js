@@ -8,7 +8,7 @@ export function paddlePriceConfiguration(env = process.env) {
 export function paddleSettings(env = process.env) {
   return {
     priceId: env.PADDLE_UNBAN_PRICE_ID?.trim() || '',
-    environment: env.PADDLE_ENVIRONMENT?.trim() || 'sandbox',
+    environment: env.PADDLE_ENVIRONMENT?.trim() || '',
     apiKey: env.PADDLE_API_KEY?.trim() || '',
     webhookSecret: env.PADDLE_WEBHOOK_SECRET?.trim() || '',
   };
@@ -21,7 +21,10 @@ export function validatePaddleSettings(env = process.env) {
   if (!settings.webhookSecret) missing.push('PADDLE_WEBHOOK_SECRET');
   if (!settings.priceId) missing.push('PADDLE_UNBAN_PRICE_ID');
   else if (!priceIdValid(settings.priceId)) invalid.push('PADDLE_UNBAN_PRICE_ID');
-  if (!['sandbox', 'production'].includes(settings.environment)) invalid.push('PADDLE_ENVIRONMENT');
+  if (!settings.environment) missing.push('PADDLE_ENVIRONMENT');
+  else if (!['sandbox', 'production'].includes(settings.environment)) invalid.push('PADDLE_ENVIRONMENT');
+  if (settings.apiKey.startsWith('pdl_live_') && settings.environment !== 'production') invalid.push('PADDLE_API_KEY');
+  if (settings.apiKey.startsWith('pdl_sdbx_') && settings.environment !== 'sandbox') invalid.push('PADDLE_API_KEY');
   return { missing, invalid };
 }
 export function paddleEnvironment() {

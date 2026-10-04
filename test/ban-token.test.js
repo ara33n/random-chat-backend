@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createBanToken, readBanToken } from '../payments/ban-token.js';
 import { paddleHandlers, UnbanPayment } from '../payments/paddle.js';
 const secret='test-signing-secret';
-const ban={_id:'123456789012345678901234',ip:'192.0.2.1',expiry:new Date(Date.now()+600000)};
+const ban={_id:'123456789012345678901234',ip:'192.0.2.1',status:'active',reactivationEligible:true,expiry:new Date(Date.now()+600000)};
 test('ban references are signed, expire and reject tampering',()=>{
  const token=createBanToken(ban,secret);
  assert.equal(readBanToken(token,{secret}),ban._id);
@@ -14,7 +14,7 @@ test('ban references are signed, expire and reject tampering',()=>{
 });
 test('checkout and payment status use the signed ban even if the HTTP IP changes',async()=>{
  const old={...process.env};
- process.env.PADDLE_API_KEY='test-api';process.env.PADDLE_WEBHOOK_SECRET=secret;process.env.PADDLE_UNBAN_PRICE_ID='pri_01m429f20x3bj3nr3qkp99f1t0';
+ process.env.PADDLE_API_KEY='test-api';process.env.PADDLE_WEBHOOK_SECRET=secret;process.env.PADDLE_UNBAN_PRICE_ID='pri_01m429f20x3bj3nr3qkp99f1t0';process.env.PADDLE_ENVIRONMENT='sandbox';
  const token=createBanToken(ban,secret);
  const existing={orderId:'test-order',priceId:'pri_01m429f20x3bj3nr3qkp99f1t0',transactionId:'txn_test',status:'pending',environment:'sandbox'};
  const init=mock.method(UnbanPayment,'init',async()=>{});
@@ -25,7 +25,7 @@ test('checkout and payment status use the signed ban even if the HTTP IP changes
  try{
   await handlers.checkout({body:{banToken:token}},res);assert.equal(res.statusCode,200);assert.equal(res.body.transactionId,'txn_test');
   await handlers.status({headers:{'x-ban-checkout-token':token},params:{orderId:'test-order'}},res);assert.deepEqual(res.body,{status:'pending'});
-  activeBan=null;await handlers.checkout({body:{banToken:token}},res);assert.equal(res.statusCode,409);assert.equal(res.body.code,'BAN_NOT_ACTIVE');
+  activeBan=null;await handlers.checkout({body:{banToken:token}},res);assert.equal(res.statusCode,409);assert.equal(res.body.code,'BAN_NOT_ELIGIBLE');
   await handlers.checkout({body:{banToken:'tampered'}},res);assert.equal(res.statusCode,403);
- }finally{init.mock.restore();find.mock.restore();for(const key of ['PADDLE_API_KEY','PADDLE_WEBHOOK_SECRET','PADDLE_UNBAN_PRICE_ID']){if(old[key]===undefined)delete process.env[key];else process.env[key]=old[key];}}
+ }finally{init.mock.restore();find.mock.restore();for(const key of ['PADDLE_API_KEY','PADDLE_WEBHOOK_SECRET','PADDLE_UNBAN_PRICE_ID','PADDLE_ENVIRONMENT']){if(old[key]===undefined)delete process.env[key];else process.env[key]=old[key];}}
 });

@@ -38,7 +38,7 @@ before(async () => {
   await mongoose.connect(`${mongo.replace(/\/$/, '')}/${database}`, { serverSelectionTimeoutMS: 3000 });
   server = spawn(process.execPath, ['server.js'], {
     env: { ...process.env, MONGO_URI: `${mongo.replace(/\/$/, '')}/${database}`, PORT: `${port}`,
-      FRONTEND_ORIGINS: 'https://loopchatx.chat', TRUST_PROXY: 'true', PADDLE_WEBHOOK_SECRET: 'integration-webhook-secret', PADDLE_API_KEY: '', PADDLE_UNBAN_PRICE_ID: '', ADMIN_USER: 'integration-operator', ADMIN_PASS: 'integration-only-secret', ADMIN_TOKEN: '' }, stdio: 'ignore',
+      FRONTEND_ORIGINS: 'https://loopchatx.chat', TRUST_PROXY: 'true', PADDLE_ENVIRONMENT: 'sandbox', PADDLE_WEBHOOK_SECRET: 'integration-webhook-secret', PADDLE_API_KEY: '', PADDLE_UNBAN_PRICE_ID: 'pri_test', ADMIN_USER: 'integration-operator', ADMIN_PASS: 'integration-only-secret', ADMIN_TOKEN: '' }, stdio: 'ignore',
   });
   for (let i = 0; i < 50; i++) {
     try { if ((await fetch(`${url}/health`)).ok) return; } catch {}
@@ -162,7 +162,7 @@ test('reviewed reports enforce a real ban and support unban', async()=>{
 test('signed Paddle fulfillment closes only its paid ban and is idempotent', async()=>{
  const bans=mongoose.connection.collection('bans');
  const ip='127.0.0.29';
- const first=await bans.insertOne({ip,reason:'paid test ban',status:'active',expiry:new Date(Date.now()+60000)});
+ const first=await bans.insertOne({ip,reason:'paid test ban',status:'active',reactivationEligible:true,expiry:new Date(Date.now()+60000)});
  const second=await bans.insertOne({ip,reason:'later ban',status:'active',expiry:new Date(Date.now()+60000)});
  const orderId='integration-paddle-order';
  await mongoose.connection.collection('unbanpayments').insertOne({orderId,banId:first.insertedId,ip,priceId:'pri_test',transactionId:'txn_test',status:'pending',environment:'sandbox'});
@@ -242,7 +242,7 @@ test('unconfigured checkout reports missing setting names, not secret values',as
  const response=await fetch(url+'/api/paddle/checkout',{method:'POST',headers:{Origin:'https://loopchatx.chat','content-type':'application/json'},body:'{}'});
  assert.equal(response.status,503);
  const body=await response.json();
- assert.deepEqual(body.missing,['PADDLE_API_KEY','PADDLE_UNBAN_PRICE_ID']);
+ assert.deepEqual(body.missing,['PADDLE_API_KEY']);
  assert.ok(!JSON.stringify(body).includes('integration-webhook-secret'));
 });
 
