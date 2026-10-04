@@ -16,7 +16,7 @@ import filter from "leo-profanity";
 import mongoose from "mongoose";
 import { randomUUID } from "node:crypto";
 import { BAN_RESET_MS, nextBanPolicy } from "./moderation/ban-policy.js";
-import { declaredUnderage } from "./moderation/age-policy.js";
+import { asksForAge, declaredUnderage, underageShortAnswer } from "./moderation/age-policy.js";
 
 // === Existing models ===
 import Message from "./models/Message.js";
@@ -653,7 +653,9 @@ io.on("connection", (socket) => {
         const partner = safePartner(socket.id);
         if (!partner) return;
 
-        if (declaredUnderage(msg)) {
+        const ageReplyExpected = Number(socket.data.ageReplyExpectedUntil) > Date.now();
+        socket.data.ageReplyExpectedUntil = 0;
+        if (declaredUnderage(msg) || (ageReplyExpected && underageShortAnswer(msg))) {
             try {
                 const ban = await createAgeRestriction(ip);
                 bannedIPs.set(ip, ban.expiry.getTime());
@@ -666,6 +668,8 @@ io.on("connection", (socket) => {
             }
             return;
         }
+
+        if (asksForAge(msg)) partner.data.ageReplyExpectedUntil = Date.now() + 2 * 60 * 1000;
 
         const partnerIp = partner.data.ip;
 

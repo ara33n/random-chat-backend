@@ -252,6 +252,19 @@ test('an explicit under-18 declaration causes an immediate ineligible age restri
  [a,b].forEach(s=>s.disconnect());
 });
 
+test('a short under-18 number is banned when it answers a recent age question', async()=>{
+ const asker=client(),minor=client();
+ asker.io.opts.extraHeaders['x-forwarded-for']='127.0.0.53';
+ minor.io.opts.extraHeaders['x-forwarded-for']='127.0.0.54';
+ await Promise.all([connect(asker),connect(minor)]);await pair(asker,minor);
+ const question=event(minor,'message');asker.emit('message','age?');assert.equal(await question,'age?');
+ const banned=event(minor,'banned');minor.emit('message','17');const result=await banned;
+ assert.equal(result.paymentEligible,false);assert.match(result.reason,/18 or older/);
+ const record=await mongoose.connection.collection('bans').findOne({ip:'127.0.0.54',source:'age',status:'active'});
+ assert.ok(record);
+ [asker,minor].forEach(s=>s.disconnect());
+});
+
 
 test('unconfigured checkout reports missing setting names, not secret values',async()=>{
  const response=await fetch(url+'/api/paddle/checkout',{method:'POST',headers:{Origin:'https://loopchatx.chat','content-type':'application/json'},body:'{}'});
