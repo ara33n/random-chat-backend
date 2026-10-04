@@ -203,3 +203,20 @@ test('only the apex and www production browser origins are accepted for HTTP and
  }
 
 });
+
+test('repeated text violations create a payable ten-minute ban that survives reconnect', async()=>{
+ const a=client(),b=client();
+ a.io.opts.extraHeaders['x-forwarded-for']='127.0.0.41';
+ b.io.opts.extraHeaders['x-forwarded-for']='127.0.0.42';
+ await Promise.all([connect(a),connect(b)]);await pair(a,b);
+ const warning=event(b,'warning');a.emit('message','sex');await warning;
+ const banned=event(a,'banned');a.emit('message','sex');const result=await banned;
+ assert.equal(result.paymentEligible,true);
+ assert.ok(result.remaining >= 598 && result.remaining <= 600);
+ const record=await mongoose.connection.collection('bans').findOne({ip:'127.0.0.41',status:'active'});
+ assert.ok(record);assert.ok(record.expiry.getTime()-Date.now()>590000);
+ const again=client();again.io.opts.extraHeaders['x-forwarded-for']='127.0.0.41';
+ const rejected=event(again,'connect_error');again.connect();const error=await rejected;
+ assert.equal(error.message,'BANNED');assert.equal(error.data.paymentEligible,true);
+ [a,b,again].forEach(s=>s.disconnect());
+});

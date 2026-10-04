@@ -555,6 +555,9 @@ io.on("connection", (socket) => {
         if (isBad) {
             const count = (badWordCount.get(ip) || 0) + 1;
             badWordCount.set(ip, count);
+            const banTime = 10 * 60 * 1000;
+            // Block additional messages while the persistent ban is being saved.
+            if (count >= 2) bannedIPs.set(ip, Date.now() + banTime);
             socket.emit("bad-word-warning", { text: msg, strikes: count });
             partner.emit("message", msg);
             partner.emit("warning", {
@@ -579,12 +582,23 @@ io.on("connection", (socket) => {
             }
 
             if (count >= 2) {
-                const banTime = 60 * 1000;
-                bannedIPs.set(ip, Date.now() + banTime);
-                socket.emit("banned", {
-                    reason: "You are banned for inappropriate text.",
-                    remaining: Math.ceil(banTime / 1000),
-                });
+                try {
+                    const ban = await Ban.create({
+                        ip, reason: 'You are banned for inappropriate text.',
+                        expiry: new Date(Date.now() + banTime), status: 'active',
+                    });
+                    bannedIPs.delete(ip);
+                    badWordCount.delete(ip);
+                    disconnectBannedIp(ip, ban);
+                } catch {
+                    // Fail closed if MongoDB is unavailable; do not sell an unsaved restriction.
+                    socket.emit('banned', {
+                        reason: 'You are banned for inappropriate text. Payment is temporarily unavailable.',
+                        remaining: Math.max(0, Math.ceil((bannedIPs.get(ip) - Date.now()) / 1000)),
+                        paymentEligible: false,
+                    });
+                    breakPair(socket, 'partner-stopped');
+                }
             }
             return;
         }
