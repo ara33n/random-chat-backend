@@ -14,6 +14,8 @@ import fs from "fs";
 import path from "path";
 import filter from "leo-profanity";
 import mongoose from "mongoose";
+import { randomUUID } from "node:crypto";
+import { BAN_RESET_MS, nextBanPolicy } from "./moderation/ban-policy.js";
 
 // === Existing models ===
 import Message from "./models/Message.js";
@@ -101,18 +103,56 @@ const banSchema = new mongoose.Schema({
     paymentOrderId: { type: String },
     paymentUrl: { type: String },
     reactivationEligible: { type: Boolean, default: false },
+    source: { type: String, enum: ["moderation", "admin"], default: "admin" },
+    banLevel: { type: Number, min: 1, max: 3, default: 1 },
+    escalationResetAt: { type: Date },
+    appealToken: { type: String, unique: true, sparse: true, select: false },
+    appealStatus: { type: String, enum: ["none", "pending", "approved", "rejected"], default: "none" },
+    appealReason: { type: String },
+    appealRequestedAt: { type: Date },
+    appealReviewedAt: { type: Date },
     createdAt: { type: Date, default: Date.now },
 });
 const Ban = mongoose.model("Ban", banSchema);
+
+async function createModerationBan(ip, reason, reactivationEligible = false) {
+    const now = Date.now();
+    const lastBan = await Ban.findOne({ ip, source: "moderation", createdAt: { $gt: new Date(now - BAN_RESET_MS) } })
+        .sort({ createdAt: -1 }).select("banLevel createdAt").lean();
+    const policy = nextBanPolicy(lastBan, now);
+    return Ban.create({
+        ip, reason, expiry: new Date(now + policy.durationMs), status: "active",
+        source: "moderation", banLevel: policy.banLevel,
+        escalationResetAt: policy.escalationResetAt, reactivationEligible,
+        appealToken: randomUUID(),
+    });
+}
+
+function publicBanData(ban) {
+    const nextDuration = ban.source === 'moderation'
+        ? nextBanPolicy(ban, new Date(ban.createdAt).getTime() + 1).durationMs
+        : 0;
+    return {
+        paymentEligible: ban.reactivationEligible === true,
+        ...(ban.reactivationEligible === true ? { banToken: createBanToken(ban) } : {}),
+        appealToken: ban.appealToken,
+        appealStatus: ban.appealStatus || "none",
+        banLevel: ban.banLevel || 1,
+        ...(nextDuration ? { nextBanDurationSeconds: Math.round(nextDuration / 1000) } : {}),
+        escalationResetAt: ban.escalationResetAt?.toISOString?.(),
+        expiresAt: ban.expiry.toISOString(), reason: ban.reason,
+        remaining: Math.max(0, Math.ceil((ban.expiry.getTime() - Date.now()) / 1000)),
+    };
+}
 
 // ---------------- Helpers ----------------
 async function getActiveBan({ ip, email }) {
     // Prefer email if present
     let q = email ? { email, status: "active" } : { ip, status: "active" };
-    let ban = await Ban.findOne({ ...q, expiry: { $gt: new Date() } }).sort({ createdAt: -1 });
+    let ban = await Ban.findOne({ ...q, expiry: { $gt: new Date() } }).select('+appealToken').sort({ createdAt: -1 });
     if (!ban && email && ip) {
         // fallback to IP if email ban not found
-        ban = await Ban.findOne({ ip, status: "active", expiry: { $gt: new Date() } }).sort({
+        ban = await Ban.findOne({ ip, status: "active", expiry: { $gt: new Date() } }).select('+appealToken').sort({
             createdAt: -1,
         });
     }
@@ -160,6 +200,41 @@ app.get('/api/paddle/price', priceHandlers.get);
 app.get('/admin/paddle/price', adminAuth, priceHandlers.get);
 app.post('/admin/paddle/price', adminAuth, priceHandlers.update);
 app.get('/admin/session', adminAuth, (_req, res) => res.json({ ok: true }));
+
+app.post('/api/ban-appeal', async (req, res) => {
+    const token = typeof req.body?.appealToken === 'string' ? req.body.appealToken.trim() : '';
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 1000) : '';
+    if (!/^[0-9a-f-]{36}$/i.test(token) || reason.length < 10)
+        return res.status(400).json({ error: 'Add a brief reason for your review request.' });
+    try {
+        const ban = await Ban.findOne({ appealToken: token, status: 'active', expiry: { $gt: new Date() } }).select('+appealToken');
+        if (!ban) return res.status(404).json({ error: 'This restriction is no longer available for review.' });
+        if (ban.appealStatus === 'pending') return res.json({ status: 'pending' });
+        if (ban.appealStatus !== 'none') return res.status(409).json({ error: 'This review request has already been decided.' });
+        ban.appealStatus = 'pending';
+        ban.appealReason = reason;
+        ban.appealRequestedAt = new Date();
+        await ban.save();
+        res.json({ status: 'pending' });
+    } catch (error) {
+        console.error('Ban appeal request failed:', error.name);
+        res.status(503).json({ error: 'Unable to send the review request. Please try again.' });
+    }
+});
+
+app.post('/api/ban-appeal/status', async (req, res) => {
+    const token = typeof req.body?.appealToken === 'string' ? req.body.appealToken.trim() : '';
+    if (!/^[0-9a-f-]{36}$/i.test(token)) return res.status(400).json({ error: 'Valid review token required.' });
+    try {
+        const ban = await Ban.findOne({ appealToken: token }).select('+appealToken appealStatus status expiry');
+        if (!ban) return res.status(404).json({ error: 'Review request not found.' });
+        const active = ban.status === 'active' && ban.expiry.getTime() > Date.now();
+        res.json({ status: ban.appealStatus || 'none', active });
+    } catch (error) {
+        console.error('Ban appeal status failed:', error.name);
+        res.status(503).json({ error: 'Unable to check the review request.' });
+    }
+});
 
 function ipLocation(ip) {
     const location = geoip.lookup(String(ip || '').replace(/^::ffff:/, ''));
@@ -216,6 +291,8 @@ app.post("/admin/ban-user", adminAuth, async (req, res) => {
             reason: reason || "Manual admin ban",
             expiry,
             status: "active",
+            source: "admin",
+            appealToken: randomUUID(),
         });
         await ban.save();
         if (ip) disconnectBannedIp(ip, ban);
@@ -299,7 +376,7 @@ app.post("/admin/resolve-report", adminAuth, async (req, res) => {
         const report = await Report.findById(reportId);
         if (!report) return res.status(404).json({ error: 'Report not found' });
         if (update.status === 'banned') {
-            const ban = await Ban.create({ ip: report.accusedIp, reason: 'Administrator reviewed report', expiry: new Date(Date.now() + 10 * 60 * 1000), status: 'active' });
+            const ban = await createModerationBan(report.accusedIp, 'Administrator reviewed report');
             disconnectBannedIp(report.accusedIp, ban);
         }
         report.status = update.status;
@@ -324,6 +401,29 @@ app.get("/admin/bans", adminAuth, async (req, res) => {
     }
 });
 
+app.post('/admin/ban-appeal', adminAuth, async (req, res) => {
+    const banId = typeof req.body?.banId === 'string' ? req.body.banId : '';
+    const action = String(req.body?.action || '');
+    if (!/^[a-f0-9]{24}$/i.test(banId) || !['approve', 'reject'].includes(action))
+        return res.status(400).json({ error: 'Valid banId and action are required' });
+    try {
+        const ban = await Ban.findOne({ _id: banId, appealStatus: 'pending' });
+        if (!ban) return res.status(404).json({ error: 'Pending review request not found' });
+        ban.appealStatus = action === 'approve' ? 'approved' : 'rejected';
+        ban.appealReviewedAt = new Date();
+        if (action === 'approve') {
+            ban.status = 'closed';
+            ban.closedAt = new Date();
+            ban.expiry = new Date(Date.now() - 1000);
+        }
+        await ban.save();
+        res.json({ message: `Review request ${ban.appealStatus}`, ban });
+    } catch (error) {
+        console.error('Ban appeal review failed:', error.name);
+        res.status(503).json({ error: 'Unable to review request' });
+    }
+});
+
 // ---------------- Socket.io ----------------
 const server = http.createServer(app);
 const io = new IOServer(server, { cors: corsOptions, maxHttpBufferSize: 32768,
@@ -340,7 +440,7 @@ io.use(async (socket, next) => {
         const activeBan = await getActiveBan({ ip });
         if (activeBan) {
             const error = new Error('BANNED');
-            error.data = { paymentEligible: activeBan.reactivationEligible === true, ...(activeBan.reactivationEligible === true ? { banToken: createBanToken(activeBan) } : {}), expiresAt: activeBan.expiry.toISOString(), reason: activeBan.reason, remaining: Math.ceil((activeBan.expiry.getTime() - Date.now()) / 1000) };
+            error.data = publicBanData(activeBan);
             return next(error);
         }
         next();
@@ -372,7 +472,7 @@ function disconnectBannedIp(ip, ban) {
         if (socket.data.ip !== ip) continue;
         const partner = io.sockets.sockets.get(partnerOf.get(socket.id));
         partner?.emit('partner-banned');
-        socket.emit('banned', { paymentEligible: ban.reactivationEligible === true, ...(ban.reactivationEligible === true ? { banToken: createBanToken(ban) } : {}), expiresAt: ban.expiry.toISOString(), reason: ban.reason, remaining: Math.max(0, Math.ceil((ban.expiry.getTime() - Date.now()) / 1000)) });
+        socket.emit('banned', publicBanData(ban));
         socket.disconnect(true);
     }
 }
@@ -555,9 +655,8 @@ io.on("connection", (socket) => {
         if (isBad) {
             const count = (badWordCount.get(ip) || 0) + 1;
             badWordCount.set(ip, count);
-            const banTime = 10 * 60 * 1000;
             // Block additional messages while the persistent ban is being saved.
-            if (count >= 2) bannedIPs.set(ip, Date.now() + banTime);
+            if (count >= 2) bannedIPs.set(ip, Date.now() + 10 * 60 * 1000);
             socket.emit("bad-word-warning", { text: msg, strikes: count });
             partner.emit("message", msg);
             partner.emit("warning", {
@@ -583,11 +682,8 @@ io.on("connection", (socket) => {
 
             if (count >= 2) {
                 try {
-                    const ban = await Ban.create({
-                        ip, reason: 'You are banned for inappropriate text.',
-                        expiry: new Date(Date.now() + banTime), status: 'active', reactivationEligible: true,
-                    });
-                    bannedIPs.delete(ip);
+                    const ban = await createModerationBan(ip, 'You are banned for inappropriate text.', true);
+                    bannedIPs.set(ip, ban.expiry.getTime());
                     badWordCount.delete(ip);
                     disconnectBannedIp(ip, ban);
                 } catch {

@@ -234,6 +234,15 @@ test('repeated text violations create a payable ten-minute ban that survives rec
  const again=client();again.io.opts.extraHeaders['x-forwarded-for']='127.0.0.41';
  const rejected=event(again,'connect_error');again.connect();const error=await rejected;
  assert.equal(error.message,'BANNED');assert.equal(error.data.paymentEligible,true);
+ assert.equal(typeof result.appealToken,'string');
+ const appeal=await fetch(url+'/api/ban-appeal',{method:'POST',headers:{Origin:'https://loopchatx.chat','content-type':'application/json'},body:JSON.stringify({appealToken:result.appealToken,reason:'The automated restriction should be reviewed.'})});
+ assert.equal(appeal.status,200);assert.deepEqual(await appeal.json(),{status:'pending'});
+ const pending=await mongoose.connection.collection('bans').findOne({_id:record._id});
+ assert.equal(pending.appealStatus,'pending');assert.match(pending.appealReason,/automated restriction/);
+ const reviewed=await fetch(url+'/admin/ban-appeal',{method:'POST',headers:{'content-type':'application/json','x-admin-user':'integration-operator','x-admin-pass':'integration-only-secret'},body:JSON.stringify({banId:String(record._id),action:'approve'})});
+ assert.equal(reviewed.status,200);
+ const status=await fetch(url+'/api/ban-appeal/status',{method:'POST',headers:{Origin:'https://loopchatx.chat','content-type':'application/json'},body:JSON.stringify({appealToken:result.appealToken})});
+ assert.deepEqual(await status.json(),{status:'approved',active:false});
  [a,b,again].forEach(s=>s.disconnect());
 });
 
