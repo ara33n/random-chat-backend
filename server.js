@@ -16,6 +16,7 @@ import filter from "leo-profanity";
 import mongoose from "mongoose";
 import { randomUUID } from "node:crypto";
 import { BAN_RESET_MS, nextBanPolicy } from "./moderation/ban-policy.js";
+import { declaredUnderage } from "./moderation/age-policy.js";
 
 // === Existing models ===
 import Message from "./models/Message.js";
@@ -103,7 +104,7 @@ const banSchema = new mongoose.Schema({
     paymentOrderId: { type: String },
     paymentUrl: { type: String },
     reactivationEligible: { type: Boolean, default: false },
-    source: { type: String, enum: ["moderation", "admin"], default: "admin" },
+    source: { type: String, enum: ["moderation", "admin", "age"], default: "admin" },
     banLevel: { type: Number, min: 1, max: 3, default: 1 },
     escalationResetAt: { type: Date },
     appealToken: { type: String, unique: true, sparse: true, select: false },
@@ -124,6 +125,18 @@ async function createModerationBan(ip, reason, reactivationEligible = false) {
         ip, reason, expiry: new Date(now + policy.durationMs), status: "active",
         source: "moderation", banLevel: policy.banLevel,
         escalationResetAt: policy.escalationResetAt, reactivationEligible,
+        appealToken: randomUUID(),
+    });
+}
+
+function createAgeRestriction(ip) {
+    return Ban.create({
+        ip,
+        reason: 'LoopChatX is only available to people aged 18 or older.',
+        expiry: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
+        status: 'active',
+        source: 'age',
+        reactivationEligible: false,
         appealToken: randomUUID(),
     });
 }
@@ -512,13 +525,9 @@ function dequeue(mode, id) {
 
 function tryMatch(mode) {
     const list = queues[mode];
-    let attempts = list.length;
-    while (list.length >= 2 && attempts-- > 0) {
+    while (list.length >= 2) {
         const aId = list.shift();
-        const aSocket = io.sockets.sockets.get(aId);
-        const compatible = list.findIndex(id => !aSocket?.data.blocked?.has(id) && !io.sockets.sockets.get(id)?.data.blocked?.has(aId));
-        if (compatible < 0) { list.push(aId); continue; }
-        const bId = list.splice(compatible, 1)[0];
+        const bId = list.shift();
         const a = io.sockets.sockets.get(aId);
         const b = io.sockets.sockets.get(bId);
         if (!a || !b) {
@@ -577,26 +586,16 @@ function breakPair(socket, notifyEvent) {
 
 io.on("connection", (socket) => {
     const ip = socket.data.ip;
-    socket.data.blocked = new Set();
     const rates = new Map();
     socket.use(([event, payload], next) => {
         if (payload !== undefined && JSON.stringify(payload).length > 24000) return;
-        if (!['find-partner','signal','message','report-user','block-user','typing','stop-typing','skip','stop'].includes(event)) return;
+        if (!['find-partner','signal','message','report-user','typing','stop-typing','skip','stop'].includes(event)) return;
         const now = Date.now();
-        const limit = ['report-user', 'block-user'].includes(event) ? 6 : event === 'signal' ? 100 : 30;
+        const limit = event === 'report-user' ? 6 : event === 'signal' ? 100 : 30;
         let entry = rates.get(event);
         if (!entry || entry.until < now) { entry = { count: 0, until: now + 10000 }; rates.set(event, entry); }
         if (++entry.count > limit) { socket.emit('rate-limit', { message: 'Please slow down and try again shortly.' }); return; }
         next();
-    });
-    socket.on('block-user', () => {
-        const partner = safePartner(socket.id);
-        if (!partner) return;
-        if (socket.data.blocked.size >= 100) { socket.emit('rate-limit'); return; }
-        socket.data.blocked.add(partner.id);
-        breakPair(socket, 'partner-stopped');
-        socket.emit('self-stopped');
-        socket.emit('block-success');
     });
     broadcastOnlineCount();
 
@@ -646,6 +645,20 @@ io.on("connection", (socket) => {
         }
         const partner = safePartner(socket.id);
         if (!partner) return;
+
+        if (declaredUnderage(msg)) {
+            try {
+                const ban = await createAgeRestriction(ip);
+                bannedIPs.set(ip, ban.expiry.getTime());
+                badWordCount.delete(ip);
+                disconnectBannedIp(ip, ban);
+            } catch (error) {
+                console.error('Age restriction save failed:', error.name);
+                socket.emit('server-error', { error: 'Unable to apply the age restriction safely.' });
+                socket.disconnect(true);
+            }
+            return;
+        }
 
         const partnerIp = partner.data.ip;
 
@@ -753,8 +766,6 @@ io.on("connection", (socket) => {
                 })),
             });
             await report.save();
-            if (socket.data.blocked.size < 100) socket.data.blocked.add(target.id);
-
             socket.emit("report-success", {
                 message: "Report submitted to admin",
             });

@@ -118,15 +118,6 @@ test('reports reject arbitrary targets and ignore client-supplied IPs', async ()
   [a,b,outsider].forEach(s=>s.disconnect());
 });
 
-test('blocked connections cannot match again and other users can still match', async()=>{
-  const a=client(),b=client(),c=client();await Promise.all([connect(a),connect(b),connect(c)]);await pair(a,b);
-  const blocked=event(a,'block-success');a.emit('block-user');await blocked;
-  let reunited=false;a.on('partner-found',data=>{if(data.partnerId===b.id) reunited=true;});
-  a.emit('find-partner',{mode:'text'});b.emit('find-partner',{mode:'text'});await delay(150);assert.equal(reunited,false);
-  const matched=event(c,'partner-found');c.emit('find-partner',{mode:'text'});await matched;
-  [a,b,c].forEach(s=>s.disconnect());
-});
-
 test('admin, snapshots and payment records cannot be read anonymously',async()=>{
  for(const path of ['/admin/session','/admin/reports','/admin/payments','/admin/paddle/price','/snapshots/anything.png']){
   const response=await fetch(url+path);assert.equal(response.status,403);assert.match(response.headers.get('x-robots-tag'),/noindex/);
@@ -244,6 +235,20 @@ test('repeated text violations create a payable ten-minute ban that survives rec
  const status=await fetch(url+'/api/ban-appeal/status',{method:'POST',headers:{Origin:'https://loopchatx.chat','content-type':'application/json'},body:JSON.stringify({appealToken:result.appealToken})});
  assert.deepEqual(await status.json(),{status:'approved',active:false});
  [a,b,again].forEach(s=>s.disconnect());
+});
+
+test('an explicit under-18 declaration causes an immediate ineligible age restriction', async()=>{
+ const a=client(),b=client();
+ a.io.opts.extraHeaders['x-forwarded-for']='127.0.0.51';
+ b.io.opts.extraHeaders['x-forwarded-for']='127.0.0.52';
+ await Promise.all([connect(a),connect(b)]);await pair(a,b);
+ let warned=false;a.on('bad-word-warning',()=>{warned=true;});
+ const banned=event(a,'banned');a.emit('message',"I'm 16 years old");const result=await banned;
+ assert.equal(warned,false);assert.equal(result.paymentEligible,false);
+ assert.match(result.reason,/18 or older/);assert.ok(result.remaining > 31_000_000);
+ const record=await mongoose.connection.collection('bans').findOne({ip:'127.0.0.51',source:'age',status:'active'});
+ assert.ok(record);assert.equal(record.reactivationEligible,false);
+ [a,b].forEach(s=>s.disconnect());
 });
 
 
