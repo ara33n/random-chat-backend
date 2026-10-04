@@ -1,6 +1,7 @@
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { createHmac } from 'node:crypto';
 import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { io } from 'socket.io-client';
@@ -20,7 +21,7 @@ const event = (socket, name) => Promise.race([
 ]);
 function client(transport = 'polling') {
   const socket = io(url, { autoConnect: false, transports: [transport], reconnection: false,
-    extraHeaders: { Origin: 'http://localhost:4200' } });
+    extraHeaders: { Origin: 'https://loopchatx.chat' } });
   clients.push(socket);
   return socket;
 }
@@ -37,7 +38,7 @@ before(async () => {
   await mongoose.connect(`${mongo.replace(/\/$/, '')}/${database}`, { serverSelectionTimeoutMS: 3000 });
   server = spawn(process.execPath, ['server.js'], {
     env: { ...process.env, MONGO_URI: `${mongo.replace(/\/$/, '')}/${database}`, PORT: `${port}`,
-      FRONTEND_ORIGINS: 'http://localhost:4200', TRUST_PROXY: 'true', ADMIN_USER: 'integration-operator', ADMIN_PASS: 'integration-only-secret', ADMIN_TOKEN: '' }, stdio: 'ignore',
+      FRONTEND_ORIGINS: 'https://loopchatx.chat', TRUST_PROXY: 'true', PADDLE_WEBHOOK_SECRET: 'integration-webhook-secret', ADMIN_USER: 'integration-operator', ADMIN_PASS: 'integration-only-secret', ADMIN_TOKEN: '' }, stdio: 'ignore',
   });
   for (let i = 0; i < 50; i++) {
     try { if ((await fetch(`${url}/health`)).ok) return; } catch {}
@@ -54,8 +55,8 @@ after(async () => {
 
 test('health checks MongoDB and polling permits the configured frontend origin', async () => {
   assert.deepEqual(await (await fetch(`${url}/health`)).json(), { ok: true, database: 'connected' });
-  const response = await fetch(`${url}/socket.io/?EIO=4&transport=polling`, { headers: { Origin: 'http://localhost:4200' } });
-  assert.equal(response.headers.get('access-control-allow-origin'), 'http://localhost:4200');
+  const response = await fetch(`${url}/socket.io/?EIO=4&transport=polling`, { headers: { Origin: 'https://loopchatx.chat' } });
+  assert.equal(response.headers.get('access-control-allow-origin'), 'https://loopchatx.chat');
   assert.match(await response.text(), /^0/);
   const other = await fetch(`${url}/socket.io/?EIO=4&transport=polling`, { headers: { Origin: 'https://unconfigured.example' } });
   assert.equal(other.headers.get('access-control-allow-origin'), null);
@@ -95,7 +96,7 @@ test('stopped users are removed from the waiting queue', async () => {
 
 test('active bans reject the handshake before chat events can be sent', async () => {
   await mongoose.connection.collection('bans').insertOne({ ip: '127.0.0.9', status: 'active', reason: 'test', expiry: new Date(Date.now() + 60000), createdAt: new Date() });
-  const socket = io(url, { autoConnect: false, reconnection: false, extraHeaders: { 'x-forwarded-for': '127.0.0.9' } });
+  const socket = io(url, { autoConnect: false, reconnection: false, extraHeaders: { Origin: 'https://loopchatx.chat', 'x-forwarded-for': '127.0.0.9' } });
   clients.push(socket);
   const failure = event(socket, 'connect_error'); socket.connect();
   const error = await failure; assert.equal(error.message, 'BANNED'); assert.equal(error.data.reason, 'test');
@@ -151,4 +152,44 @@ test('reviewed reports enforce a real ban and support unban', async()=>{
  const ban=await mongoose.connection.collection('bans').findOne({ip:'127.0.0.23',status:'active'});assert.ok(ban);
  const closed=await fetch(url+'/admin/unban-user',{method:'POST',headers,body:JSON.stringify({banId:String(ban._id)})});assert.equal(closed.status,200);
  [a,b].forEach(s=>s.disconnect());
+});
+
+
+test('signed Paddle fulfillment closes only its paid ban and is idempotent', async()=>{
+ const bans=mongoose.connection.collection('bans');
+ const ip='127.0.0.29';
+ const first=await bans.insertOne({ip,reason:'paid test ban',status:'active',expiry:new Date(Date.now()+60000)});
+ const second=await bans.insertOne({ip,reason:'later ban',status:'active',expiry:new Date(Date.now()+60000)});
+ const orderId='integration-paddle-order';
+ await mongoose.connection.collection('unbanpayments').insertOne({orderId,banId:first.insertedId,ip,priceId:'pri_test',transactionId:'txn_test',status:'pending'});
+ const data={id:'txn_test',status:'completed',custom_data:{order_id:orderId},items:[{quantity:1,price:{id:'pri_test',billing_cycle:null}}]};
+ async function send(body,valid=true){
+   const ts=String(Math.floor(Date.now()/1000));
+   const signature=createHmac('sha256',valid?'integration-webhook-secret':'wrong').update(ts+':'+body).digest('hex');
+   return fetch(url+'/api/paddle/webhook',{method:'POST',headers:{'content-type':'application/json','paddle-signature':`ts=${ts};h1=${signature}`},body});
+ }
+ const body=JSON.stringify({event_type:'transaction.completed',data});
+ assert.equal((await send(body,false)).status,400);
+ assert.equal((await bans.findOne({_id:first.insertedId})).status,'active');
+ assert.equal((await send(JSON.stringify({event_type:'transaction.completed',data:{...data,id:'txn_wrong'}}))).status,400);
+ assert.equal((await send(body)).status,200);
+ assert.equal((await send(body)).status,200);
+ assert.equal((await bans.findOne({_id:first.insertedId})).status,'closed');
+ assert.equal((await bans.findOne({_id:second.insertedId})).status,'active');
+ const status=await fetch(url+'/api/paddle/status/'+orderId,{headers:{'x-forwarded-for':ip}});
+ assert.deepEqual(await status.json(),{status:'completed'});
+ assert.equal((await fetch(url+'/api/paddle/status/'+orderId)).status,404);
+});
+
+
+test('only the production browser origin is accepted for HTTP and WebSocket', async()=>{
+ for (const origin of ['https://loop-chatx.vercel.app','https://www.loopchatx.chat','http://localhost:4200','https://loopchatx.chat.evil.example','null']) {
+   const response=await fetch(url+'/health',{headers:{Origin:origin}});
+   assert.equal(response.status,403,origin);
+   const socket=io(url,{autoConnect:false,reconnection:false,transports:['websocket'],extraHeaders:{Origin:origin}});clients.push(socket);
+   const rejected=event(socket,'connect_error');socket.connect();await rejected;socket.disconnect();
+ }
+ const socket=io(url,{autoConnect:false,reconnection:false,transports:['websocket']});clients.push(socket);
+ const rejected=event(socket,'connect_error');socket.connect();await rejected;socket.disconnect();
+ assert.equal((await fetch(url+'/health',{headers:{Origin:'https://loopchatx.chat'}})).status,200);
 });

@@ -1,4 +1,5 @@
 import express from "express";
+import { paddleHandlers } from "./payments/paddle.js";
 import http from "http";
 import { isIP } from "node:net";
 import cors from "cors";
@@ -29,13 +30,17 @@ function clientIp(req) {
     }
     return direct;
 }
-const allowedOrigins = (process.env.FRONTEND_ORIGINS ||
-    'http://localhost:4200,https://loop-chatx.vercel.app')
-    .split(',').map(origin => origin.trim().replace(/\/$/, '')).filter(Boolean);
+// Deliberately fixed: stale hosting environment values cannot allow other websites.
+const allowedOrigins = ['https://loopchatx.chat'];
 const corsOptions = { origin: allowedOrigins, credentials: true, methods: ['GET', 'POST', 'OPTIONS'] };
 
 // ---------------- App & DB ----------------
 const app = express();
+app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    if (origin && !allowedOrigins.includes(origin)) return res.status(403).json({ error: 'Origin not allowed' });
+    next();
+});
 app.use(cors(corsOptions));
 app.disable('x-powered-by');
 app.use((req, res, next) => {
@@ -54,6 +59,8 @@ app.use((req, res, next) => {
     next();
 });
 setInterval(() => { for (const [key, value] of httpRates) if (value.until < Date.now()) httpRates.delete(key); }, 60000).unref();
+const paddle = paddleHandlers({ getBanModel: () => Ban, getActiveBan, clientIp });
+app.post('/api/paddle/webhook', express.raw({ type: 'application/json', limit: '256kb' }), paddle.webhook);
 app.use(express.json({ limit: '32kb' }));
 app.use(express.urlencoded({ extended: false, limit: "32kb" }));
 app.use((req, res, next) => {
@@ -168,7 +175,9 @@ app.get("/check-outbound-ip", adminAuth, async (_req, res) => {
     }
 });
 
-// Safety restrictions cannot be bypassed by an unverified payment.
+// Legacy payment routes stay retired; only verified Paddle webhooks can unlock a ban.
+app.post('/api/paddle/checkout', paddle.checkout);
+app.get('/api/paddle/status/:orderId', paddle.status);
 app.post('/api/create-payment', (_req, res) => res.status(410).json({ error: 'Payment unlock is unavailable' }));
 app.get('/api/payment-status/:orderId', (_req, res) => res.status(410).json({ error: 'Payment unlock is unavailable' }));
 app.get('/admin/session', adminAuth, (_req, res) => res.json({ ok: true }));
@@ -322,7 +331,7 @@ app.get("/admin/bans", adminAuth, async (req, res) => {
 // ---------------- Socket.io ----------------
 const server = http.createServer(app);
 const io = new IOServer(server, { cors: corsOptions, maxHttpBufferSize: 32768,
-    allowRequest: (req, done) => done(null, !req.headers.origin || allowedOrigins.includes(req.headers.origin))
+    allowRequest: (req, done) => done(null, allowedOrigins.includes(req.headers.origin))
 });
 
 // Finish the database-backed access check before accepting the socket.
@@ -335,7 +344,7 @@ io.use(async (socket, next) => {
         const activeBan = await getActiveBan({ ip });
         if (activeBan) {
             const error = new Error('BANNED');
-            error.data = { reason: activeBan.reason, remaining: Math.ceil((activeBan.expiry.getTime() - Date.now()) / 1000) };
+            error.data = { paymentEligible: true, reason: activeBan.reason, remaining: Math.ceil((activeBan.expiry.getTime() - Date.now()) / 1000) };
             return next(error);
         }
         next();
@@ -365,7 +374,7 @@ const bannedIPs = new Map();
 function disconnectBannedIp(ip, ban) {
     for (const socket of io.sockets.sockets.values()) {
         if (socket.data.ip !== ip) continue;
-        socket.emit('banned', { reason: ban.reason, remaining: Math.max(0, Math.ceil((ban.expiry.getTime() - Date.now()) / 1000)) });
+        socket.emit('banned', { paymentEligible: true, reason: ban.reason, remaining: Math.max(0, Math.ceil((ban.expiry.getTime() - Date.now()) / 1000)) });
         socket.disconnect(true);
     }
 }

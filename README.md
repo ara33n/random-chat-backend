@@ -15,7 +15,7 @@ npm run start
 Use Node.js 24 LTS (pinned in `.node-version` and `package.json`). Local `.env` configuration is loaded automatically; host-provided values take precedence.
 
 - `MONGO_URI`: MongoDB connection string, supplied through the host's environment settings.
-- `FRONTEND_ORIGINS`: comma-separated exact frontend origins. Defaults to `http://localhost:4200,https://loop-chatx.vercel.app`.
+- Browser origin is fixed to `https://loopchatx.chat` for HTTP and Socket.IO. Other origins (including localhost, www and preview deployments) are rejected. `FRONTEND_ORIGINS` no longer changes this allowlist. No-Origin HTTP requests remain available for Render health checks and signed Paddle webhooks; sockets require the exact Origin. Origin filtering is not authentication against non-browser clients.
 - `PORT`: supplied by Render (defaults to 3001 locally).
 
 Configure the Render health-check path as `/health`. This returns HTTP 200 only when a database ping succeeds, and HTTP 503 otherwise. `/` is only a basic HTTP liveness check and cannot confirm database readiness.
