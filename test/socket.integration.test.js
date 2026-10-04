@@ -234,7 +234,8 @@ test('repeated text violations create a payable ten-minute ban that survives rec
  assert.equal(reviewed.status,200);
  const status=await fetch(url+'/api/ban-appeal/status',{method:'POST',headers:{Origin:'https://loopchatx.chat','content-type':'application/json'},body:JSON.stringify({appealToken:result.appealToken})});
  assert.deepEqual(await status.json(),{status:'approved',active:false});
- [a,b,again].forEach(s=>s.disconnect());
+ const released=client();released.io.opts.extraHeaders['x-forwarded-for']='127.0.0.41';await connect(released);
+ [a,b,again,released].forEach(s=>s.disconnect());
 });
 
 test('an explicit under-18 declaration causes an immediate ineligible age restriction', async()=>{

@@ -346,6 +346,7 @@ app.post("/admin/unban-user", adminAuth, async (req, res) => {
         ban.closedAt = new Date();
         if (ban.expiry > new Date()) ban.expiry = new Date(Date.now() - 1000);
         await ban.save();
+        clearRuntimeBan(ban.ip);
 
         // Close related reports by ip
         if (ban.ip) {
@@ -406,7 +407,7 @@ app.get("/admin/bans", adminAuth, async (req, res) => {
     try {
         const activeOnly = String(req.query.activeOnly || "true") === "true";
         const q = activeOnly ? { status: "active", expiry: { $gt: new Date() } } : {};
-        const bans = await Ban.find(q).sort({ createdAt: -1 });
+        const bans = await Ban.find(q).sort({ createdAt: -1 }).limit(500);
         res.json(bans);
     } catch (e) {
         console.error("Admin bans list error:", e);
@@ -430,6 +431,7 @@ app.post('/admin/ban-appeal', adminAuth, async (req, res) => {
             ban.expiry = new Date(Date.now() - 1000);
         }
         await ban.save();
+        if (action === 'approve') clearRuntimeBan(ban.ip);
         res.json({ message: `Review request ${ban.appealStatus}`, ban });
     } catch (error) {
         console.error('Ban appeal review failed:', error.name);
@@ -480,6 +482,12 @@ filter.add(["sex", "nude", "xxx"]);
 const badWordCount = new Map();
 const bannedIPs = new Map();
 
+function clearRuntimeBan(ip) {
+    if (!ip) return;
+    bannedIPs.delete(ip);
+    badWordCount.delete(ip);
+}
+
 function disconnectBannedIp(ip, ban) {
     for (const socket of io.sockets.sockets.values()) {
         if (socket.data.ip !== ip) continue;
@@ -498,8 +506,7 @@ function isTempBanned(ip) {
     const expiry = bannedIPs.get(ip);
     if (!expiry) return false;
     if (Date.now() > expiry) {
-        bannedIPs.delete(ip);
-        badWordCount.delete(ip);
+        clearRuntimeBan(ip);
         return false;
     }
     return true;
