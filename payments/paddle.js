@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual, randomUUID } from 'node:crypto';
 import axios from 'axios';
 import mongoose from 'mongoose';
+import { readBanToken } from './ban-token.js';
 
 const schema = new mongoose.Schema({
   orderId: { type: String, unique: true, required: true },
@@ -45,9 +46,17 @@ export function paddleHandlers({ getBanModel, getActiveBan, clientIp }) {
       if (missing.length) return res.status(503).json({ error: 'Paddle checkout is not configured yet.', missing });
       try {
         await UnbanPayment.init();
-        const ip = clientIp(req);
-        const ban = await getActiveBan({ ip });
-        if (!ban) return res.status(409).json({ error: 'No active payable ban. Temporary word-filter restrictions expire automatically.' });
+        let ban;
+        if (req.body?.banToken) {
+          const id = readBanToken(req.body.banToken, { allowExpired: true });
+          if (!id) return res.status(403).json({ error: 'Invalid checkout reference. Reconnect to refresh your restriction.' });
+          ban = await getBanModel().findOne({ _id: id, status: 'active', expiry: { $gt: new Date() } });
+        } else {
+          // Compatibility for older clients; new clients use the signed ban reference.
+          ban = await getActiveBan({ ip: clientIp(req) });
+        }
+        if (!ban) return res.status(409).json({ code: 'BAN_NOT_ACTIVE', error: 'This restriction has expired or was removed. Reconnect to chat; no payment is needed for it.' });
+        const ip = ban.ip;
         const existing = await UnbanPayment.findOne({ banId: ban._id, status: 'pending', transactionId: { $exists: true } });
         if (existing) return res.json({ orderId: existing.orderId, transactionId: existing.transactionId, priceId: existing.priceId });
         const orderId = randomUUID();
@@ -70,7 +79,10 @@ export function paddleHandlers({ getBanModel, getActiveBan, clientIp }) {
     },
     async status(req, res) {
       try {
-        const payment = await UnbanPayment.findOne({ orderId: req.params.orderId, ip: clientIp(req) });
+        const token = req.headers['x-ban-checkout-token'];
+        const banId = token ? readBanToken(token, { allowExpired: true }) : null;
+        if (token && !banId) return res.status(403).json({ error: 'Invalid checkout reference.' });
+        const payment = await UnbanPayment.findOne({ orderId: req.params.orderId, ...(banId ? { banId } : { ip: clientIp(req) }) });
         if (!payment) return res.status(404).json({ error: 'Payment not found.' });
         res.json({ status: payment.status });
       } catch { res.status(503).json({ error: 'Unable to check payment.' }); }

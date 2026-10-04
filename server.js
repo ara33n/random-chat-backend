@@ -1,4 +1,5 @@
 import express from "express";
+import { createBanToken } from "./payments/ban-token.js";
 import { paddleHandlers } from "./payments/paddle.js";
 import http from "http";
 import { isIP } from "node:net";
@@ -102,10 +103,10 @@ const Ban = mongoose.model("Ban", banSchema);
 async function getActiveBan({ ip, email }) {
     // Prefer email if present
     let q = email ? { email, status: "active" } : { ip, status: "active" };
-    let ban = await Ban.findOne(q).sort({ createdAt: -1 });
+    let ban = await Ban.findOne({ ...q, expiry: { $gt: new Date() } }).sort({ createdAt: -1 });
     if (!ban && email && ip) {
         // fallback to IP if email ban not found
-        ban = await Ban.findOne({ ip, status: "active" }).sort({
+        ban = await Ban.findOne({ ip, status: "active", expiry: { $gt: new Date() } }).sort({
             createdAt: -1,
         });
     }
@@ -250,7 +251,7 @@ app.post("/admin/unban-user", adminAuth, async (req, res) => {
                 createdAt: -1,
             });
         if (!ban && ip)
-            ban = await Ban.findOne({ ip, status: "active" }).sort({
+            ban = await Ban.findOne({ ip, status: "active", expiry: { $gt: new Date() } }).sort({
                 createdAt: -1,
             });
         if (!ban)
@@ -344,7 +345,7 @@ io.use(async (socket, next) => {
         const activeBan = await getActiveBan({ ip });
         if (activeBan) {
             const error = new Error('BANNED');
-            error.data = { paymentEligible: true, expiresAt: activeBan.expiry.toISOString(), reason: activeBan.reason, remaining: Math.ceil((activeBan.expiry.getTime() - Date.now()) / 1000) };
+            error.data = { paymentEligible: true, banToken: createBanToken(activeBan), expiresAt: activeBan.expiry.toISOString(), reason: activeBan.reason, remaining: Math.ceil((activeBan.expiry.getTime() - Date.now()) / 1000) };
             return next(error);
         }
         next();
@@ -374,7 +375,7 @@ const bannedIPs = new Map();
 function disconnectBannedIp(ip, ban) {
     for (const socket of io.sockets.sockets.values()) {
         if (socket.data.ip !== ip) continue;
-        socket.emit('banned', { paymentEligible: true, expiresAt: ban.expiry.toISOString(), reason: ban.reason, remaining: Math.max(0, Math.ceil((ban.expiry.getTime() - Date.now()) / 1000)) });
+        socket.emit('banned', { paymentEligible: true, banToken: createBanToken(ban), expiresAt: ban.expiry.toISOString(), reason: ban.reason, remaining: Math.max(0, Math.ceil((ban.expiry.getTime() - Date.now()) / 1000)) });
         socket.disconnect(true);
     }
 }
