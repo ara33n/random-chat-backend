@@ -124,7 +124,7 @@ test('blocked connections cannot match again and other users can still match', a
 });
 
 test('admin, snapshots and payment records cannot be read anonymously',async()=>{
- for(const path of ['/admin/session','/admin/reports','/admin/payments','/snapshots/anything.png']){
+ for(const path of ['/admin/session','/admin/reports','/admin/payments','/admin/paddle/price','/snapshots/anything.png']){
   const response=await fetch(url+path);assert.equal(response.status,403);assert.match(response.headers.get('x-robots-tag'),/noindex/);
  }
  assert.equal((await fetch(url+'/api/payment-status/order_example')).status,410);
@@ -251,4 +251,10 @@ test('database admin credentials override a stale environment password', async()
  assert.equal((await request('integration-only-secret')).status,403);
  assert.equal((await request('database test secret')).status,403);
  await AdminAccount.deleteOne({username});
+});
+
+
+test('anonymous callers cannot change the configured price',async()=>{
+ const response=await fetch(url+'/admin/paddle/price',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({amount:'1.00',currency:'USD'})});
+ assert.equal(response.status,403);
 });

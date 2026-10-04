@@ -78,3 +78,8 @@ Safe diagnostics include `hasUnbanPriceId`, `priceIdStartsWithPri`, trimmed `pri
 
 
 The fixed-length `^pri_[a-z0-9]{26}$` price guard has been removed. It rejected any ID outside its exact length/character assumptions before Paddle could inspect it. The `PADDLE_PRICE_ID_INVALID` response comes from checkout's configuration guard after `validatePaddleSettings` rejects the local syntax. Valid local syntax now reaches Paddle, including variable-length IDs. The price is URL-encoded as one path segment, so relaxed local validation cannot alter the request path or query. Paddle 404/other lookup errors still return `PADDLE_PRICE_LOOKUP_FAILED`. Startup also prints `[Paddle] price configuration` with configured/prefix/length/whitespace metadata only. The particular Render value is unavailable locally; no claim is made about its exact failing character or length.
+
+
+## Administrator price editor
+
+Admin → Unlock price reads and updates the configured one-time Paddle price. The backend requires price.read and price.write permissions; no private keys enter the frontend. Currency remains the configured price currency and amounts are validated in its minor-unit precision. This edits the actual Paddle catalog amount, so use a price dedicated to unban checkout. Existing checkout transactions retain their quoted amounts. The ban modal shows the current base price; taxes, localized overrides or an existing checkout may differ, and Paddle displays the final amount. Public price reads are cached for up to 30 seconds; a successful admin edit clears that cache on the current process.

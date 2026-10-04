@@ -1,3 +1,4 @@
+import { priceHandlers } from './payments/price.js';
 import { paddleConfiguration, paddlePriceConfiguration } from './payments/diagnostics.js';
 import { adminAuth } from './auth/admin.js';
 import express from "express";
@@ -166,6 +167,9 @@ app.post('/api/paddle/checkout', paddle.checkout);
 app.get('/api/paddle/status/:orderId', paddle.status);
 app.post('/api/create-payment', (_req, res) => res.status(410).json({ error: 'Payment unlock is unavailable' }));
 app.get('/api/payment-status/:orderId', (_req, res) => res.status(410).json({ error: 'Payment unlock is unavailable' }));
+app.get('/api/paddle/price', priceHandlers.get);
+app.get('/admin/paddle/price', adminAuth, priceHandlers.get);
+app.post('/admin/paddle/price', adminAuth, priceHandlers.update);
 app.get('/admin/session', adminAuth, (_req, res) => res.json({ ok: true }));
 
 function ipLocation(ip) {
@@ -377,6 +381,8 @@ const bannedIPs = new Map();
 function disconnectBannedIp(ip, ban) {
     for (const socket of io.sockets.sockets.values()) {
         if (socket.data.ip !== ip) continue;
+        const partner = io.sockets.sockets.get(partnerOf.get(socket.id));
+        partner?.emit('partner-banned');
         socket.emit('banned', { paymentEligible: true, banToken: createBanToken(ban), expiresAt: ban.expiry.toISOString(), reason: ban.reason, remaining: Math.max(0, Math.ceil((ban.expiry.getTime() - Date.now()) / 1000)) });
         socket.disconnect(true);
     }
@@ -597,6 +603,7 @@ io.on("connection", (socket) => {
                     disconnectBannedIp(ip, ban);
                 } catch {
                     // Fail closed if MongoDB is unavailable; do not sell an unsaved restriction.
+                    partner.emit('partner-banned');
                     socket.emit('banned', {
                         reason: 'You are banned for inappropriate text. Payment is temporarily unavailable.',
                         remaining: Math.max(0, Math.ceil((bannedIPs.get(ip) - Date.now()) / 1000)),
