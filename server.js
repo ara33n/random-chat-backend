@@ -1,6 +1,7 @@
+import { adminAuth } from './auth/admin.js';
 import express from "express";
 import { createBanToken } from "./payments/ban-token.js";
-import { paddleHandlers } from "./payments/paddle.js";
+import { paddleHandlers, UnbanPayment } from "./payments/paddle.js";
 import http from "http";
 import { isIP } from "node:net";
 import cors from "cors";
@@ -134,25 +135,6 @@ try {
 
 app.use("/snapshots", adminAuth, express.static(path.join(process.cwd(), "snapshots")));
 
-// ---------------- Admin auth (simple header check) ----------------
-function adminAuth(req, res, next) {
-    const user = req.headers["x-admin-user"];
-    const pass = req.headers["x-admin-pass"];
-    const token = req.headers["x-admin-token"];
-
-    const ADMIN_USER = process.env.ADMIN_USER;
-    const ADMIN_PASS = process.env.ADMIN_PASS;
-    const ADMIN_TOKEN = process.env.ADMIN_TOKEN || null;
-
-    if (
-        (ADMIN_USER && ADMIN_PASS && user === ADMIN_USER && pass === ADMIN_PASS) ||
-        (token && token === ADMIN_TOKEN)
-    ) {
-        return next();
-    }
-    return res.status(403).json({ error: "Unauthorized" });
-}
-
 // ---------------- Basic routes ----------------
 app.get("/", (req, res) =>
     res.json({ ok: true, message: "Random Chat Signaling Server running." })
@@ -183,11 +165,28 @@ app.post('/api/create-payment', (_req, res) => res.status(410).json({ error: 'Pa
 app.get('/api/payment-status/:orderId', (_req, res) => res.status(410).json({ error: 'Payment unlock is unavailable' }));
 app.get('/admin/session', adminAuth, (_req, res) => res.json({ ok: true }));
 
+function ipLocation(ip) {
+    const location = geoip.lookup(String(ip || '').replace(/^::ffff:/, ''));
+    return { country: location?.country || '', region: location?.region || '', city: location?.city || '' };
+}
+
+app.get('/admin/payments', adminAuth, async (_req, res) => {
+    try {
+        const payments = await UnbanPayment.find({ status: 'completed' })
+            .select('orderId banId ip transactionId status amountMinor currency completedAt environment createdAt')
+            .sort({ completedAt: -1, createdAt: -1 }).limit(500).lean();
+        res.json(payments);
+    } catch { res.status(503).json({ error: 'Unable to load payments' }); }
+});
+
 // ---------------- Admin: Reports & Bans ----------------
 app.get("/admin/reports", adminAuth, async (_req, res) => {
     try {
-        const reports = await Report.find().sort({ createdAt: -1 });
-        res.json(reports);
+        const reports = await Report.find().sort({ createdAt: -1 }).lean();
+        res.json(reports.map(report => ({ ...report,
+            reporterLocation: report.reporterLocation?.country ? report.reporterLocation : ipLocation(report.reporterIp),
+            accusedLocation: report.accusedLocation?.country ? report.accusedLocation : ipLocation(report.accusedIp),
+        })));
     } catch (err) {
         console.error("Admin reports error:", err);
         res.status(500).json({ error: "Failed to fetch reports" });
@@ -320,7 +319,7 @@ app.post("/admin/resolve-report", adminAuth, async (req, res) => {
 app.get("/admin/bans", adminAuth, async (req, res) => {
     try {
         const activeOnly = String(req.query.activeOnly || "true") === "true";
-        const q = activeOnly ? { status: "active" } : {};
+        const q = activeOnly ? { status: "active", expiry: { $gt: new Date() } } : {};
         const bans = await Ban.find(q).sort({ createdAt: -1 });
         res.json(bans);
     } catch (e) {
@@ -644,6 +643,8 @@ io.on("connection", (socket) => {
             const report = new Report({
                 reporterIp: ip,
                 accusedIp,
+                reporterLocation: ipLocation(ip),
+                accusedLocation: ipLocation(accusedIp),
                 reason:
                     reason ||
                     (scope ? `User report (${scope})` : "User report"),

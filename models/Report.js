@@ -4,6 +4,8 @@ const reportSchema = new mongoose.Schema({
   reporterIp: { type: String, required: true },
   accusedIp: { type: String, required: true },
   reason: { type: String },
+  reporterLocation: { country: String, region: String, city: String },
+  accusedLocation: { country: String, region: String, city: String },
   messages: [
     {
       text: String,

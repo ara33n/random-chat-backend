@@ -110,7 +110,7 @@ test('reports reject arbitrary targets and ignore client-supplied IPs', async ()
   const denied=event(a,'report-error');a.emit('report-user',{accusedSocketId:outsider.id,accusedIp:'unrelated',reason:'false target'});await denied;
   const accepted=event(a,'report-success');a.emit('report-user',{accusedSocketId:b.id,accusedIp:'spoofed',reason:'integration report'});await accepted;
   const report=await mongoose.connection.collection('reports').findOne({reason:'integration report'});
-  assert.ok(report);assert.notEqual(report.accusedIp,'spoofed');
+  assert.ok(report);assert.notEqual(report.accusedIp,'spoofed');assert.equal(typeof report.reporterLocation.country,'string');
   [a,b,outsider].forEach(s=>s.disconnect());
 });
 
@@ -124,7 +124,7 @@ test('blocked connections cannot match again and other users can still match', a
 });
 
 test('admin, snapshots and payment records cannot be read anonymously',async()=>{
- for(const path of ['/admin/session','/admin/reports','/snapshots/anything.png']){
+ for(const path of ['/admin/session','/admin/reports','/admin/payments','/snapshots/anything.png']){
   const response=await fetch(url+path);assert.equal(response.status,403);assert.match(response.headers.get('x-robots-tag'),/noindex/);
  }
  assert.equal((await fetch(url+'/api/payment-status/order_example')).status,410);
@@ -162,7 +162,7 @@ test('signed Paddle fulfillment closes only its paid ban and is idempotent', asy
  const second=await bans.insertOne({ip,reason:'later ban',status:'active',expiry:new Date(Date.now()+60000)});
  const orderId='integration-paddle-order';
  await mongoose.connection.collection('unbanpayments').insertOne({orderId,banId:first.insertedId,ip,priceId:'pri_test',transactionId:'txn_test',status:'pending'});
- const data={id:'txn_test',status:'completed',custom_data:{order_id:orderId},items:[{quantity:1,price:{id:'pri_test',billing_cycle:null}}]};
+ const data={currency_code:'USD',details:{totals:{grand_total:'1250'}},id:'txn_test',status:'completed',custom_data:{order_id:orderId},items:[{quantity:1,price:{id:'pri_test',billing_cycle:null}}]};
  async function send(body,valid=true){
    const ts=String(Math.floor(Date.now()/1000));
    const signature=createHmac('sha256',valid?'integration-webhook-secret':'wrong').update(ts+':'+body).digest('hex');
@@ -179,6 +179,12 @@ test('signed Paddle fulfillment closes only its paid ban and is idempotent', asy
  const status=await fetch(url+'/api/paddle/status/'+orderId,{headers:{'x-forwarded-for':ip}});
  assert.deepEqual(await status.json(),{status:'completed'});
  assert.equal((await fetch(url+'/api/paddle/status/'+orderId)).status,404);
+ const admin = await fetch(url+'/admin/payments',{headers:{'x-admin-user':'integration-operator','x-admin-pass':'integration-only-secret'}});
+ assert.equal(admin.status,200);
+ const rows=await admin.json();
+ const paid=rows.find(row=>row.orderId===orderId);
+ assert.equal(paid.amountMinor,'1250'); assert.equal(paid.currency,'USD'); assert.ok(paid.completedAt);
+ assert.equal(rows.filter(row=>row.orderId===orderId).length,1);
 });
 
 
@@ -230,4 +236,15 @@ test('unconfigured checkout reports missing setting names, not secret values',as
  const body=await response.json();
  assert.deepEqual(body.missing,['PADDLE_API_KEY','PADDLE_UNBAN_PRICE_ID']);
  assert.ok(!JSON.stringify(body).includes('integration-webhook-secret'));
+});
+
+test('database admin credentials override a stale environment password', async()=>{
+ const { AdminAccount, passwordRecord } = await import('../auth/admin.js');
+ const username='integration-operator';
+ await AdminAccount.create({username,...await passwordRecord('Database test secret')});
+ const request=pass=>fetch(url+'/admin/session',{headers:{'x-admin-user':username,'x-admin-pass':pass}});
+ assert.equal((await request('Database test secret')).status,200);
+ assert.equal((await request('integration-only-secret')).status,403);
+ assert.equal((await request('database test secret')).status,403);
+ await AdminAccount.deleteOne({username});
 });

@@ -9,6 +9,10 @@ const schema = new mongoose.Schema({
   ip: { type: String, required: true },
   priceId: { type: String, required: true },
   transactionId: { type: String },
+  amountMinor: String,
+  currency: String,
+  completedAt: Date,
+  environment: { type: String, enum: ['sandbox', 'production'] },
   status: { type: String, default: 'pending' },
 }, { timestamps: true });
 export const UnbanPayment = mongoose.model('UnbanPayment', schema);
@@ -61,7 +65,7 @@ export function paddleHandlers({ getBanModel, getActiveBan, clientIp }) {
         if (existing) return res.json({ orderId: existing.orderId, transactionId: existing.transactionId, priceId: existing.priceId });
         const orderId = randomUUID();
         const priceId = process.env.PADDLE_UNBAN_PRICE_ID;
-        const payment = await UnbanPayment.create({ orderId, banId: ban._id, ip, priceId });
+        const payment = await UnbanPayment.create({ orderId, banId: ban._id, ip, priceId, environment: process.env.PADDLE_ENVIRONMENT === 'production' ? 'production' : 'sandbox' });
         const origin = process.env.PADDLE_ENVIRONMENT === 'production' ? 'https://api.paddle.com' : 'https://sandbox-api.paddle.com';
         const response = await axios.post(origin + '/transactions', {
           items: [{ price_id: priceId, quantity: 1 }], collection_mode: 'automatic',
@@ -100,7 +104,18 @@ export function paddleHandlers({ getBanModel, getActiveBan, clientIp }) {
         // A webhook may race transaction creation; let Paddle retry after the ID is saved.
         if (!payment.transactionId) return res.sendStatus(503);
         if (!isExpectedTransaction(event.data, payment)) return res.sendStatus(400);
-        if (payment.status === 'completed') return res.sendStatus(200);
+        const total = event.data.details?.totals?.grand_total;
+        const currency = event.data.currency_code;
+        if (typeof total === 'string' && /^\d+$/.test(total) && /^[A-Z]{3}$/.test(currency || '')) {
+          payment.amountMinor = total;
+          payment.currency = currency;
+        }
+        const completedAt = new Date(event.occurred_at);
+        if (!payment.completedAt) payment.completedAt = Number.isNaN(completedAt.getTime()) ? new Date() : completedAt;
+        if (payment.status === 'completed') {
+          await payment.save();
+          return res.sendStatus(200);
+        }
         // Exact ban ID: payment for an old ban must never lift a later restriction.
         await getBanModel().updateOne({ _id: payment.banId, ip: payment.ip, status: 'active' }, {
           $set: { status: 'closed', closedAt: new Date(), expiry: new Date(), paymentStatus: 'success', paymentOrderId: payment.orderId },
