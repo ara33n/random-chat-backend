@@ -1,5 +1,6 @@
 import express from "express";
 import http from "http";
+import { isIP } from "node:net";
 import cors from "cors";
 import axios from "axios";
 import { Server as IOServer } from "socket.io";
@@ -10,7 +11,6 @@ import filter from "leo-profanity";
 import mongoose from "mongoose";
 
 // === Existing models ===
-import Payment from "./models/Payment.js";
 import Message from "./models/Message.js";
 import Report from "./models/Report.js";
 
@@ -20,6 +20,15 @@ import User from "./models/User.js";
 // Load local development configuration; hosted environment variables take precedence.
 if (fs.existsSync('.env')) process.loadEnvFile('.env');
 
+// Trust one platform proxy only when explicitly configured (Render sets RENDER).
+function clientIp(req) {
+    const direct = req.socket?.remoteAddress || req.connection?.remoteAddress || '';
+    if (process.env.RENDER === 'true' || process.env.TRUST_PROXY === 'true') {
+        const forwarded = String(req.headers['x-forwarded-for'] || '').split(',').at(-1)?.trim();
+        if (forwarded && isIP(forwarded)) return forwarded;
+    }
+    return direct;
+}
 const allowedOrigins = (process.env.FRONTEND_ORIGINS ||
     'http://localhost:4200,https://loop-chatx.vercel.app')
     .split(',').map(origin => origin.trim().replace(/\/$/, '')).filter(Boolean);
@@ -28,8 +37,31 @@ const corsOptions = { origin: allowedOrigins, credentials: true, methods: ['GET'
 // ---------------- App & DB ----------------
 const app = express();
 app.use(cors(corsOptions));
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.disable('x-powered-by');
+app.use((req, res, next) => {
+    res.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
+    res.set('Cache-Control', 'no-store');
+    res.set('X-Content-Type-Options', 'nosniff');
+    next();
+});
+const httpRates = new Map();
+app.use((req, res, next) => {
+    const key = clientIp(req) + ':' + (req.path.startsWith('/admin') ? 'admin' : 'api');
+    const now = Date.now();
+    let entry = httpRates.get(key);
+    if (!entry || entry.until < now) { entry = { count: 0, until: now + 60000 }; httpRates.set(key, entry); }
+    if (++entry.count > (req.path.startsWith('/admin') ? 60 : 240)) return res.status(429).json({ error: 'Too many requests' });
+    next();
+});
+setInterval(() => { for (const [key, value] of httpRates) if (value.until < Date.now()) httpRates.delete(key); }, 60000).unref();
+app.use(express.json({ limit: '32kb' }));
+app.use(express.urlencoded({ extended: false, limit: "32kb" }));
+app.use((req, res, next) => {
+    if (req.body && (Array.isArray(req.body) || Object.values(req.body).some(value => value !== null && typeof value === 'object'))) {
+        return res.status(400).json({ error: 'Only scalar fields are accepted' });
+    }
+    next();
+});
 
 mongoose
     .connect(process.env.MONGO_URI || "mongodb://127.0.0.1:27017/chatapp", { serverSelectionTimeoutMS: 5000, bufferCommands: false })
@@ -41,7 +73,7 @@ mongoose
     });
 
 // ---------------- Env & Constants ----------------
-const API_KEY = process.env.NOWPAY_API_KEY || "YYB93M2-WBMM0HH-N17825T-ERPG0QN";
+
 // ---------------- Ban Schema (extended) ----------------
 const banSchema = new mongoose.Schema({
     ip: { type: String },
@@ -92,7 +124,7 @@ try {
     console.warn("⚠️ Could not read package.json version, defaulting to 1.0.1");
 }
 
-app.use("/snapshots", express.static(path.join(process.cwd(), "snapshots")));
+app.use("/snapshots", adminAuth, express.static(path.join(process.cwd(), "snapshots")));
 
 // ---------------- Admin auth (simple header check) ----------------
 function adminAuth(req, res, next) {
@@ -100,12 +132,12 @@ function adminAuth(req, res, next) {
     const pass = req.headers["x-admin-pass"];
     const token = req.headers["x-admin-token"];
 
-    const ADMIN_USER = process.env.ADMIN_USER || "admin";
-    const ADMIN_PASS = process.env.ADMIN_PASS || "Abcd!234";
+    const ADMIN_USER = process.env.ADMIN_USER;
+    const ADMIN_PASS = process.env.ADMIN_PASS;
     const ADMIN_TOKEN = process.env.ADMIN_TOKEN || null;
 
     if (
-        (user === ADMIN_USER && pass === ADMIN_PASS) ||
+        (ADMIN_USER && ADMIN_PASS && user === ADMIN_USER && pass === ADMIN_PASS) ||
         (token && token === ADMIN_TOKEN)
     ) {
         return next();
@@ -127,7 +159,7 @@ app.get('/health', async (_req, res) => {
     }
 });
 app.get("/version", (req, res) => res.json({ version: appVersion }));
-app.get("/check-outbound-ip", async (_req, res) => {
+app.get("/check-outbound-ip", adminAuth, async (_req, res) => {
     try {
         const response = await axios.get("https://ifconfig.me/ip");
         res.json({ outboundIP: response.data });
@@ -136,72 +168,10 @@ app.get("/check-outbound-ip", async (_req, res) => {
     }
 });
 
-// ---------------- Payments (as-is) ----------------
-app.post("/api/create-payment", async (req, res) => {
-    try {
-        const { amount, currency } = req.body;
-        const response = await axios.post(
-            "https://api.nowpayments.io/v1/invoice",
-            {
-                price_amount: amount,
-                price_currency: currency,
-                pay_currency: "icx",
-                order_id: "order_" + Date.now(),
-                order_description: "Payment via NOWPayments",
-                ipn_callback_url: "http://localhost:3001/api/payment-webhook",
-            },
-            {
-                headers: {
-                    "x-api-key": API_KEY,
-                    "Content-Type": "application/json",
-                },
-            }
-        );
-
-        const newPayment = new Payment({
-            orderId: response.data.order_id,
-            amount: response.data.price_amount,
-            currency: response.data.price_currency,
-            payCurrency: response.data.pay_currency,
-            paymentStatus: response.data.payment_status,
-            paymentId: response.data.id,
-        });
-        await newPayment.save();
-
-        res.json({
-            payment_url: response.data.invoice_url,
-            orderId: response.data.order_id,
-        });
-    } catch (error) {
-        console.error(
-            "Create Invoice Error:",
-            error.response?.data || error.message
-        );
-        res.status(500).json({ error: "Payment creation failed" });
-    }
-});
-
-app.get("/api/payment-status/:orderId", async (req, res) => {
-    try {
-        const { orderId } = req.params;
-        const payment = await Payment.findOne({ orderId });
-        if (!payment)
-            return res.status(404).json({ error: "Payment not found" });
-        res.json({
-            orderId: payment.orderId,
-            amount: payment.amount,
-            currency: payment.currency,
-            payCurrency: payment.payCurrency,
-            status: payment.paymentStatus,
-            txHash: payment.txHash,
-            createdAt: payment.createdAt,
-            updatedAt: payment.updatedAt,
-        });
-    } catch (err) {
-        console.error("Status Check Error:", err);
-        res.status(500).json({ error: "Failed to fetch status" });
-    }
-});
+// Safety restrictions cannot be bypassed by an unverified payment.
+app.post('/api/create-payment', (_req, res) => res.status(410).json({ error: 'Payment unlock is unavailable' }));
+app.get('/api/payment-status/:orderId', (_req, res) => res.status(410).json({ error: 'Payment unlock is unavailable' }));
+app.get('/admin/session', adminAuth, (_req, res) => res.json({ ok: true }));
 
 // ---------------- Admin: Reports & Bans ----------------
 app.get("/admin/reports", adminAuth, async (_req, res) => {
@@ -216,12 +186,13 @@ app.get("/admin/reports", adminAuth, async (_req, res) => {
 
 // List users for admin
 app.get("/admin/users", adminAuth, async (req, res) => {
-    const q = (req.query.q || "").toString().trim();
-    const filter = q
-        ? { $or: [{ email: new RegExp(q, "i") }, { name: new RegExp(q, "i") }] }
-        : {};
-    const users = await User.find(filter).sort({ lastLoginAt: -1 }).limit(500);
-    res.json(users);
+    try {
+        const q = String(req.query.q || '').trim().slice(0, 100);
+        const literal = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const query = q ? { $or: [{ email: new RegExp(literal, 'i') }, { name: new RegExp(literal, 'i') }] } : {};
+        const users = await User.find(query).sort({ lastLoginAt: -1 }).limit(500);
+        res.json(users);
+    } catch { res.status(500).json({ error: 'Failed to fetch users' }); }
 });
 
 // Ban by ip OR email
@@ -242,6 +213,7 @@ app.post("/admin/ban-user", adminAuth, async (req, res) => {
             status: "active",
         });
         await ban.save();
+        if (ip) disconnectBannedIp(ip, ban);
 
         // Mark related reports as banned (IP-only link available by default)
         if (ip) {
@@ -319,7 +291,14 @@ app.post("/admin/resolve-report", adminAuth, async (req, res) => {
             status:
                 String(action).toLowerCase() === "ban" ? "banned" : "reviewed",
         };
-        await Report.findByIdAndUpdate(reportId, update);
+        const report = await Report.findById(reportId);
+        if (!report) return res.status(404).json({ error: 'Report not found' });
+        if (update.status === 'banned') {
+            const ban = await Ban.create({ ip: report.accusedIp, reason: 'Administrator reviewed report', expiry: new Date(Date.now() + 10 * 60 * 1000), status: 'active' });
+            disconnectBannedIp(report.accusedIp, ban);
+        }
+        report.status = update.status;
+        await report.save();
         res.json({ message: "Report updated", action: update.status });
     } catch (err) {
         console.error("Resolve report error:", err);
@@ -342,13 +321,14 @@ app.get("/admin/bans", adminAuth, async (req, res) => {
 
 // ---------------- Socket.io ----------------
 const server = http.createServer(app);
-const io = new IOServer(server, { cors: corsOptions });
+const io = new IOServer(server, { cors: corsOptions, maxHttpBufferSize: 32768,
+    allowRequest: (req, done) => done(null, !req.headers.origin || allowedOrigins.includes(req.headers.origin))
+});
 
 // Finish the database-backed access check before accepting the socket.
 // Otherwise an early find-partner event can arrive before its listener exists.
 io.use(async (socket, next) => {
-    const ip = socket.handshake.headers['x-forwarded-for']?.split(',')[0]?.trim()
-        || socket.handshake.address;
+    const ip = clientIp(socket.request);
     socket.data.ip = ip;
     try {
         if (mongoose.connection.readyState !== 1) throw new Error('database unavailable');
@@ -376,11 +356,19 @@ const topicsOf = new Map();
 
 // profanity
 filter.loadDictionary();
-filter.add(["sex", "nude", "xxx", "islam"]);
+filter.add(["sex", "nude", "xxx"]);
 
 // local temp bans for profanity
 const badWordCount = new Map();
 const bannedIPs = new Map();
+
+function disconnectBannedIp(ip, ban) {
+    for (const socket of io.sockets.sockets.values()) {
+        if (socket.data.ip !== ip) continue;
+        socket.emit('banned', { reason: ban.reason, remaining: Math.max(0, Math.ceil((ban.expiry.getTime() - Date.now()) / 1000)) });
+        socket.disconnect(true);
+    }
+}
 
 function broadcastOnlineCount() {
     io.emit("online-count", { count: io.sockets.sockets.size });
@@ -417,9 +405,13 @@ function dequeue(mode, id) {
 
 function tryMatch(mode) {
     const list = queues[mode];
-    while (list.length >= 2) {
+    let attempts = list.length;
+    while (list.length >= 2 && attempts-- > 0) {
         const aId = list.shift();
-        const bId = list.shift();
+        const aSocket = io.sockets.sockets.get(aId);
+        const compatible = list.findIndex(id => !aSocket?.data.blocked?.has(id) && !io.sockets.sockets.get(id)?.data.blocked?.has(aId));
+        if (compatible < 0) { list.push(aId); continue; }
+        const bId = list.splice(compatible, 1)[0];
         const a = io.sockets.sockets.get(aId);
         const b = io.sockets.sockets.get(bId);
         if (!a || !b) {
@@ -428,6 +420,10 @@ function tryMatch(mode) {
             continue;
         }
 
+        a.data.previousPartner = a.data.currentPartner;
+        b.data.previousPartner = b.data.currentPartner;
+        a.data.currentPartner = { id: bId, ip: b.data.ip };
+        b.data.currentPartner = { id: aId, ip: a.data.ip };
         partnerOf.set(aId, bId);
         partnerOf.set(bId, aId);
         startedAt.set(aId, Date.now());
@@ -474,14 +470,36 @@ function breakPair(socket, notifyEvent) {
 
 io.on("connection", (socket) => {
     const ip = socket.data.ip;
+    socket.data.blocked = new Set();
+    const rates = new Map();
+    socket.use(([event, payload], next) => {
+        if (payload !== undefined && JSON.stringify(payload).length > 24000) return;
+        if (!['find-partner','signal','message','report-user','block-user','typing','stop-typing','skip','stop'].includes(event)) return;
+        const now = Date.now();
+        const limit = ['report-user', 'block-user'].includes(event) ? 6 : event === 'signal' ? 100 : 30;
+        let entry = rates.get(event);
+        if (!entry || entry.until < now) { entry = { count: 0, until: now + 10000 }; rates.set(event, entry); }
+        if (++entry.count > limit) { socket.emit('rate-limit', { message: 'Please slow down and try again shortly.' }); return; }
+        next();
+    });
+    socket.on('block-user', () => {
+        const partner = safePartner(socket.id);
+        if (!partner) return;
+        if (socket.data.blocked.size >= 100) { socket.emit('rate-limit'); return; }
+        socket.data.blocked.add(partner.id);
+        breakPair(socket, 'partner-stopped');
+        socket.emit('self-stopped');
+        socket.emit('block-success');
+    });
     broadcastOnlineCount();
 
     const geo = geoip.lookup(ip) || {};
     const country = geo?.country || "UN";
     countryOf.set(socket.id, country);
-    socket.emit("your-info", { ip, geo });
+    socket.emit("your-info", { country });
 
-    socket.on("find-partner", ({ mode, topics } = {}) => {
+    socket.on("find-partner", (data) => {
+        let { mode, topics } = data && typeof data === "object" ? data : {};
         if (isTempBanned(ip)) {
             socket.emit("banned", {
                 reason: "You are banned for inappropriate words.",
@@ -495,7 +513,7 @@ io.on("connection", (socket) => {
         if (Array.isArray(topics)) {
             topicsOf.set(
                 socket.id,
-                topics.map((t) => String(t || "").toLowerCase())
+                topics.filter(t => typeof t === "string").slice(0, 8).map(t => t.trim().slice(0, 40).toLowerCase())
             );
         } else {
             topicsOf.set(socket.id, []);
@@ -520,12 +538,7 @@ io.on("connection", (socket) => {
         const partner = safePartner(socket.id);
         if (!partner) return;
 
-        const partnerIp =
-            partner.handshake.headers["x-forwarded-for"]
-                ?.split(",")[0]
-                ?.trim() ||
-            partner.handshake.address ||
-            null;
+        const partnerIp = partner.data.ip;
 
         const roomId = [socket.id, partner.id].sort().join("_");
         const isBad = filter.check(msg);
@@ -585,52 +598,13 @@ io.on("connection", (socket) => {
 
     socket.on("report-user", async (data) => {
         try {
-            const {
-                accusedIp: accIpFromClient,
-                accusedSocketId,
-                reason,
-                scope,
-            } = data || {};
-            if (!accusedSocketId && !accIpFromClient) {
-                socket.emit("report-error", {
-                    error: "Missing accused identifier",
-                });
-                return;
-            }
-            let accusedIp = accIpFromClient || null;
-            if (!accusedIp && accusedSocketId) {
-                const accusedSock = io.sockets.sockets.get(accusedSocketId);
-                accusedIp =
-                    accusedSock?.handshake?.headers?.["x-forwarded-for"]
-                        ?.split(",")[0]
-                        ?.trim() ||
-                    accusedSock?.handshake?.address ||
-                    null;
-            }
-            if (!accusedIp) accusedIp = "unknown";
-
-            const roomId = [socket.id, accusedSocketId]
-                .filter(Boolean)
-                .sort()
-                .join("_");
-            let msgs = await Message.find({ roomId }).sort({ createdAt: 1 });
-
-            if (!msgs.length) {
-                msgs = await Message.find({
-                    $or: [
-                        {
-                            senderSocketId: socket.id,
-                            receiverSocketId: accusedSocketId,
-                        },
-                        {
-                            senderSocketId: accusedSocketId,
-                            receiverSocketId: socket.id,
-                        },
-                        { senderIp: ip, receiverIp: accusedIp },
-                        { senderIp: accusedIp, receiverIp: ip },
-                    ],
-                }).sort({ createdAt: 1 });
-            }
+            const { accusedSocketId, scope } = data || {};
+            const reason = typeof data?.reason === 'string' ? data.reason.trim().slice(0, 1000) : 'User report';
+            const target = [socket.data.currentPartner, socket.data.previousPartner].find(p => p?.id === accusedSocketId);
+            if (!target) { socket.emit('report-error', { error: 'Only your current or previous conversation can be reported' }); return; }
+            const accusedIp = target.ip;
+            const roomId = [socket.id, target.id].sort().join('_');
+            const msgs = await Message.find({ roomId }).sort({ createdAt: 1 }).limit(200);
 
             if (msgs.length) {
                 const ids = msgs.map((m) => m._id);
@@ -656,6 +630,7 @@ io.on("connection", (socket) => {
                 })),
             });
             await report.save();
+            if (socket.data.blocked.size < 100) socket.data.blocked.add(target.id);
 
             socket.emit("report-success", {
                 message: "Report submitted to admin",
@@ -723,25 +698,9 @@ io.on("connection", (socket) => {
     });
 
     // Manual ban trigger (kept for compatibility)
-    socket.on("banned", async (data) => {
-        const duration = 10 * 60 * 1000;
-        const expiry = new Date(Date.now() + duration);
-        const banDoc = new Ban({
-            ip,
-            reason: data?.reason || "Inappropriate video content",
-            expiry,
-            snapshotBase64: data?.snapshot || null,
-            status: "active",
-        });
-        await banDoc.save();
-        socket.emit("banned", {
-            reason: banDoc.reason,
-            remaining: Math.ceil(duration / 1000),
-            paymentUrl: banDoc.paymentUrl,
-            snapshot: banDoc.snapshotBase64 || null,
-        });
-        console.log("🚫 User banned manually:", ip);
-    });
+    // Client-side classification is not trusted evidence for an automatic ban.
+    // The ordinary verified report workflow handles suspected video abuse.
+
 });
 
 // ---------------- Housekeeping ----------------

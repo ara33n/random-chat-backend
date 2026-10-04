@@ -37,7 +37,7 @@ before(async () => {
   await mongoose.connect(`${mongo.replace(/\/$/, '')}/${database}`, { serverSelectionTimeoutMS: 3000 });
   server = spawn(process.execPath, ['server.js'], {
     env: { ...process.env, MONGO_URI: `${mongo.replace(/\/$/, '')}/${database}`, PORT: `${port}`,
-      FRONTEND_ORIGINS: 'http://localhost:4200' }, stdio: 'ignore',
+      FRONTEND_ORIGINS: 'http://localhost:4200', TRUST_PROXY: 'true', ADMIN_USER: 'integration-operator', ADMIN_PASS: 'integration-only-secret', ADMIN_TOKEN: '' }, stdio: 'ignore',
   });
   for (let i = 0; i < 50; i++) {
     try { if ((await fetch(`${url}/health`)).ok) return; } catch {}
@@ -100,4 +100,55 @@ test('active bans reject the handshake before chat events can be sent', async ()
   const failure = event(socket, 'connect_error'); socket.connect();
   const error = await failure; assert.equal(error.message, 'BANNED'); assert.equal(error.data.reason, 'test');
   socket.disconnect();
+});
+
+test('reports reject arbitrary targets and ignore client-supplied IPs', async () => {
+  const a=client(), b=client(), outsider=client();
+  await Promise.all([connect(a),connect(b),connect(outsider)]);
+  await pair(a,b);
+  const denied=event(a,'report-error');a.emit('report-user',{accusedSocketId:outsider.id,accusedIp:'unrelated',reason:'false target'});await denied;
+  const accepted=event(a,'report-success');a.emit('report-user',{accusedSocketId:b.id,accusedIp:'spoofed',reason:'integration report'});await accepted;
+  const report=await mongoose.connection.collection('reports').findOne({reason:'integration report'});
+  assert.ok(report);assert.notEqual(report.accusedIp,'spoofed');
+  [a,b,outsider].forEach(s=>s.disconnect());
+});
+
+test('blocked connections cannot match again and other users can still match', async()=>{
+  const a=client(),b=client(),c=client();await Promise.all([connect(a),connect(b),connect(c)]);await pair(a,b);
+  const blocked=event(a,'block-success');a.emit('block-user');await blocked;
+  let reunited=false;a.on('partner-found',data=>{if(data.partnerId===b.id) reunited=true;});
+  a.emit('find-partner',{mode:'text'});b.emit('find-partner',{mode:'text'});await delay(150);assert.equal(reunited,false);
+  const matched=event(c,'partner-found');c.emit('find-partner',{mode:'text'});await matched;
+  [a,b,c].forEach(s=>s.disconnect());
+});
+
+test('admin, snapshots and payment records cannot be read anonymously',async()=>{
+ for(const path of ['/admin/session','/admin/reports','/snapshots/anything.png']){
+  const response=await fetch(url+path);assert.equal(response.status,403);assert.match(response.headers.get('x-robots-tag'),/noindex/);
+ }
+ assert.equal((await fetch(url+'/api/payment-status/order_example')).status,410);
+ const invalid=await fetch(url+'/admin/ban-user',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({ip:{$ne:null}})});
+ assert.equal(invalid.status,400);
+});
+
+test('socket message flooding is limited',async()=>{
+ const a=client(),b=client();await Promise.all([connect(a),connect(b)]);await pair(a,b);
+ const limited=event(a,'rate-limit');for(let i=0;i<35;i++)a.emit('message','hello');await limited;
+ [a,b].forEach(s=>s.disconnect());
+});
+
+
+test('reviewed reports enforce a real ban and support unban', async()=>{
+ const a=client(),b=client();b.io.opts.extraHeaders['x-forwarded-for']='127.0.0.23';
+ await Promise.all([connect(a),connect(b)]);await pair(a,b);
+ const accepted=event(a,'report-success');a.emit('report-user',{accusedSocketId:b.id,reason:'enforcement-test'});await accepted;
+ const report=await mongoose.connection.collection('reports').findOne({reason:'enforcement-test'});
+ const headers={'content-type':'application/json','x-admin-user':'integration-operator','x-admin-pass':'integration-only-secret'};
+ assert.equal((await fetch(url+'/admin/session',{headers})).status,200);
+ const banned=event(b,'banned');
+ const result=await fetch(url+'/admin/resolve-report',{method:'POST',headers,body:JSON.stringify({reportId:String(report._id),action:'ban'})});
+ assert.equal(result.status,200);await banned;
+ const ban=await mongoose.connection.collection('bans').findOne({ip:'127.0.0.23',status:'active'});assert.ok(ban);
+ const closed=await fetch(url+'/admin/unban-user',{method:'POST',headers,body:JSON.stringify({banId:String(ban._id)})});assert.equal(closed.status,200);
+ [a,b].forEach(s=>s.disconnect());
 });
