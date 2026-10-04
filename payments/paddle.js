@@ -105,7 +105,7 @@ export function paddleHandlers({ getBanModel, getActiveBan, clientIp }) {
         const origin = paddleOrigin();
         const options = paddleRequestOptions();
         // Authenticated lookup validates the same account/environment before any POST.
-        const price = (await axios.get(origin + '/prices/' + priceId, options)).data?.data;
+        const price = (await axios.get(origin + '/prices/' + encodeURIComponent(priceId), options)).data?.data;
         if (price?.id !== priceId || price.status !== 'active' || price.billing_cycle) {
           await UnbanPayment.updateOne({ _id: payment._id, status: 'creating' }, { $set: { status: 'failed', failureCode: 'PADDLE_PRICE_INVALID' } });
           return res.status(503).json({ code: 'PADDLE_PRICE_INVALID', error: 'The configured Paddle price must be active and one-time.' });

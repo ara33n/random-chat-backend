@@ -104,10 +104,26 @@ test('missing and malformed configuration have distinct responses without callin
  try {
   process.env.PADDLE_UNBAN_PRICE_ID=' \n';
   const absent=await request();assert.equal(absent.body.code,'PADDLE_CONFIGURATION_MISSING');assert.deepEqual(absent.body.missing,['PADDLE_UNBAN_PRICE_ID']);
-  process.env.PADDLE_UNBAN_PRICE_ID='pri_short';
+  process.env.PADDLE_UNBAN_PRICE_ID='pri_bad value';
   const malformed=await request();assert.equal(malformed.body.code,'PADDLE_PRICE_ID_INVALID');assert.equal(malformed.body.missing,undefined);assert.deepEqual(malformed.body.invalid,['PADDLE_UNBAN_PRICE_ID']);
   process.env.PADDLE_UNBAN_PRICE_ID=priceId;process.env.PADDLE_ENVIRONMENT='bad';
   const environment=await request();assert.equal(environment.body.code,'PADDLE_ENVIRONMENT_INVALID');assert.equal(environment.body.missing,undefined);
   assert.equal(m.get.mock.callCount(),0);assert.equal(m.create.mock.callCount(),0);
  }finally{process.env.PADDLE_UNBAN_PRICE_ID=priceId;process.env.PADDLE_ENVIRONMENT='sandbox';m.restore();}
+});
+
+
+test('variable-length price reaches Paddle; 404 is lookup failure, never missing',async()=>{
+ const {request}=setup();const m=mocks(success);m.get.mock.restore();
+ const id='pri_short/with?reserved#characters';
+ process.env.PADDLE_UNBAN_PRICE_ID=' '+id+'\n';
+ const get=mock.method(axios,'get',async url=>{
+  assert.equal(url,'https://sandbox-api.paddle.com/prices/'+encodeURIComponent(id));
+  throw {response:{status:404,data:{error:{code:'not_found'}}}};
+ });
+ try {
+  const response=await request();assert.equal(response.statusCode,502);
+  assert.equal(response.body.code,'PADDLE_PRICE_LOOKUP_FAILED');assert.equal(response.body.missing,undefined);
+  assert.equal(get.mock.callCount(),1);assert.equal(m.create.mock.callCount(),0);
+ }finally{process.env.PADDLE_UNBAN_PRICE_ID=priceId;get.mock.restore();m.create.mock.restore();m.log.mock.restore();}
 });

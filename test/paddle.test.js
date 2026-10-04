@@ -42,8 +42,19 @@ test('configuration distinguishes whitespace, absent values, malformed IDs and e
   for(const value of [id,'private','secret'])assert.ok(!JSON.stringify(diag).includes(value));
  }
  for(const value of [undefined,'',' \n'])assert.deepEqual(validatePaddleSettings({...base,PADDLE_UNBAN_PRICE_ID:value}),{missing:['PADDLE_UNBAN_PRICE_ID'],invalid:[]});
- for(const value of ['pri_short',id+'x',id.slice(0,-1),id.toUpperCase(),'pro_'+id.slice(4),'"'+id+'"',id.slice(0,8)+' '+id.slice(8)]) {
+ for(const value of [id.toUpperCase(),'pro_'+id.slice(4),'"'+id+'"',id.slice(0,8)+' '+id.slice(8)]) {
   assert.deepEqual(validatePaddleSettings({...base,PADDLE_UNBAN_PRICE_ID:value}),{missing:[],invalid:['PADDLE_UNBAN_PRICE_ID']});
  }
  assert.deepEqual(validatePaddleSettings({...base,PADDLE_ENVIRONMENT:'wrong'}),{missing:[],invalid:['PADDLE_ENVIRONMENT']});
+});
+
+
+test('local price checks accept variable lengths and delegate validity to Paddle', async()=>{
+ const { validatePaddleSettings, paddlePriceConfiguration } = await import('../payments/diagnostics.js');
+ for (const id of ['pri_', 'pri_short', 'pri_'+'a'.repeat(80), 'pri_ABC-123']) {
+  const env={PADDLE_API_KEY:'private',PADDLE_WEBHOOK_SECRET:'secret',PADDLE_UNBAN_PRICE_ID:' '+id+'\n'};
+  assert.deepEqual(validatePaddleSettings(env),{missing:[],invalid:[]});
+  assert.deepEqual(paddlePriceConfiguration(env),{configured:true,startsWithPri:true,length:id.length,containsWhitespace:false});
+  assert.ok(!JSON.stringify(paddlePriceConfiguration(env)).includes(id));
+ }
 });

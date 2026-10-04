@@ -1,4 +1,4 @@
-import { paddleConfiguration } from './payments/diagnostics.js';
+import { paddleConfiguration, paddlePriceConfiguration } from './payments/diagnostics.js';
 import { adminAuth } from './auth/admin.js';
 import express from "express";
 import { createBanToken } from "./payments/ban-token.js";
@@ -63,6 +63,7 @@ app.use((req, res, next) => {
 });
 setInterval(() => { for (const [key, value] of httpRates) if (value.until < Date.now()) httpRates.delete(key); }, 60000).unref();
 console.info('[Paddle] configuration', paddleConfiguration());
+console.info('[Paddle] price configuration', paddlePriceConfiguration());
 const paddle = paddleHandlers({ getBanModel: () => Ban, getActiveBan, clientIp });
 app.post('/api/paddle/webhook', express.raw({ type: 'application/json', limit: '256kb' }), paddle.webhook);
 app.use(express.json({ limit: '32kb' }));

@@ -8,7 +8,7 @@ No Render API key is available in the local workspace. Live Paddle transaction c
 
 ## Render configuration and diagnosis
 
-Keep `PADDLE_ENVIRONMENT=sandbox`, `PADDLE_API_KEY`, `PADDLE_WEBHOOK_SECRET`, `PADDLE_UNBAN_PRICE_ID`. Do not paste secret values into logs, source or support messages. Price IDs must match `^pri_[a-z0-9]{26}$`.
+Keep `PADDLE_ENVIRONMENT=sandbox`, `PADDLE_API_KEY`, `PADDLE_WEBHOOK_SECRET`, `PADDLE_UNBAN_PRICE_ID`. Do not paste secret values into logs, source or support messages. After trimming, local price validation requires a nonempty string beginning with `pri_` and containing no whitespace. No fixed length is assumed; Paddle validates the price through an authenticated GET.
 
 The API key needs **price.read**, **transaction.write**, and **transaction.read** for reconciliation. All values must belong to the same sandbox account. The frontend must use that account's sandbox client token and the same price.
 
@@ -65,7 +65,7 @@ Sources:
 
 ## Environment validation correction
 
-Previously `missingPaddleSettings()` tested the raw (untrimmed) price ID against the correct 30-character Paddle format and classified every regex failure as missing. A valid ID surrounded by whitespace therefore returned a misleading missing error. The local reproduction proves this path; the exact Render value is unavailable locally, so whitespace in Render itself is not confirmed.
+Previously `missingPaddleSettings()` tested the raw (untrimmed) price ID against a fixed-length regex and classified every regex failure as missing. A valid ID surrounded by whitespace therefore returned a misleading missing error. The local reproduction proves this path; the exact Render value is unavailable locally, so whitespace in Render itself is not confirmed.
 
 All Paddle environment reads now use normalized settings: outer whitespace is trimmed, internal characters/quotes are never silently removed, and the same normalized price is used for validation, lookup, transaction creation and persistence. Sandbox remains the default when environment is unset/blank. Invalid nonempty environment names are rejected separately. API keys and webhook secrets are normalized consistently; if a previous ban reference was signed with a whitespace-padded secret, reconnect to obtain a fresh reference after deployment.
 
@@ -74,4 +74,7 @@ All Paddle environment reads now use normalized settings: outer whitespace is tr
 - Invalid environment name: `PADDLE_ENVIRONMENT_INVALID`.
 - Valid configured price rejected by Paddle: `PADDLE_PRICE_LOOKUP_FAILED` (502), never `missing`.
 
-Safe diagnostics include `hasUnbanPriceId`, `priceIdStartsWithPri`, trimmed `priceIdLength`, `priceIdFormatValid` and `priceIdWhitespaceTrimmed`. No full price ID or credentials are printed. A valid unpadded price has length 30. These diagnostics distinguish actual whitespace from an incorrect/quoted value or configuration not loaded by the deployed process.
+Safe diagnostics include `hasUnbanPriceId`, `priceIdStartsWithPri`, trimmed `priceIdLength`, `priceIdFormatValid` and `priceIdWhitespaceTrimmed`. No full price ID or credentials are printed. Length is diagnostic only, never an acceptance condition. These diagnostics distinguish actual whitespace from an incorrect/quoted value or configuration not loaded by the deployed process.
+
+
+The fixed-length `^pri_[a-z0-9]{26}$` price guard has been removed. It rejected any ID outside its exact length/character assumptions before Paddle could inspect it. The `PADDLE_PRICE_ID_INVALID` response comes from checkout's configuration guard after `validatePaddleSettings` rejects the local syntax. Valid local syntax now reaches Paddle, including variable-length IDs. The price is URL-encoded as one path segment, so relaxed local validation cannot alter the request path or query. Paddle 404/other lookup errors still return `PADDLE_PRICE_LOOKUP_FAILED`. Startup also prints `[Paddle] price configuration` with configured/prefix/length/whitespace metadata only. The particular Render value is unavailable locally; no claim is made about its exact failing character or length.

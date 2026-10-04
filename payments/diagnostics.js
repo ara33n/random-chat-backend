@@ -1,4 +1,9 @@
-export const priceIdValid = value => /^pri_[a-z0-9]{26}$/.test(value || '');
+// Local syntax check only; Paddle's authenticated price lookup is authoritative.
+export const priceIdValid = value => typeof value === 'string' && value.length > 0 && value.startsWith('pri_') && !/\s/.test(value);
+export function paddlePriceConfiguration(env = process.env) {
+  const priceId = env.PADDLE_UNBAN_PRICE_ID?.trim();
+  return { configured: Boolean(priceId), startsWithPri: Boolean(priceId?.startsWith('pri_')), length: priceId?.length || 0, containsWhitespace: /\s/.test(priceId || '') };
+}
 // Normalize once at every read; never remove internal characters or quotes.
 export function paddleSettings(env = process.env) {
   return {
