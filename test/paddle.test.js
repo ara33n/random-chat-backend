@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
-import { verifySignature, isExpectedTransaction } from '../payments/paddle.js';
+import { verifySignature, isExpectedTransaction, missingPaddleSettings } from '../payments/paddle.js';
 const secret='unit-test-secret';
 const ts=String(Math.floor(Date.now()/1000));
 const raw=Buffer.from('{"event_type":"transaction.completed"}');
@@ -18,4 +18,11 @@ test('only the exact completed one-time transaction is eligible',()=>{
  const data={id:'txn_test',status:'completed',custom_data:{order_id:'order-test'},items:[{quantity:1,price:{id:'pri_test',billing_cycle:null}}]};
  assert.equal(isExpectedTransaction(data,payment),true);
  for(const change of [{id:'txn_other'},{status:'paid'},{subscription_id:'sub_test'},{custom_data:{order_id:'other'}},{items:[{quantity:1,price:{id:'pri_other'}}]}]) assert.equal(isExpectedTransaction({...data,...change},payment),false);
+});
+
+
+test('Paddle readiness identifies missing configuration without returning secrets',()=>{
+ assert.deepEqual(missingPaddleSettings({}),['PADDLE_API_KEY','PADDLE_WEBHOOK_SECRET','PADDLE_UNBAN_PRICE_ID']);
+ assert.deepEqual(missingPaddleSettings({PADDLE_API_KEY:'private',PADDLE_WEBHOOK_SECRET:'secret',PADDLE_UNBAN_PRICE_ID:'pri_test'}),[]);
+ assert.deepEqual(missingPaddleSettings({PADDLE_API_KEY:'private',PADDLE_WEBHOOK_SECRET:' ',PADDLE_UNBAN_PRICE_ID:'invalid'}),['PADDLE_WEBHOOK_SECRET','PADDLE_UNBAN_PRICE_ID']);
 });

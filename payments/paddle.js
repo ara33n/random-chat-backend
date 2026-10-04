@@ -32,11 +32,17 @@ export function isExpectedTransaction(data, payment) {
     !data.items[0].price?.billing_cycle;
 }
 
+export function missingPaddleSettings(env = process.env) {
+  const missing = ['PADDLE_API_KEY', 'PADDLE_WEBHOOK_SECRET'].filter(key => !env[key]?.trim());
+  if (!/^pri_[a-z0-9]+$/.test(env.PADDLE_UNBAN_PRICE_ID || '')) missing.push('PADDLE_UNBAN_PRICE_ID');
+  return missing;
+}
+
 export function paddleHandlers({ getBanModel, getActiveBan, clientIp }) {
-  const configured = () => !!(process.env.PADDLE_API_KEY && process.env.PADDLE_WEBHOOK_SECRET && /^pri_[a-z0-9]+$/.test(process.env.PADDLE_UNBAN_PRICE_ID || ''));
   return {
     async checkout(req, res) {
-      if (!configured()) return res.status(503).json({ error: 'Paddle checkout is not configured yet.' });
+      const missing = missingPaddleSettings();
+      if (missing.length) return res.status(503).json({ error: 'Paddle checkout is not configured yet.', missing });
       try {
         await UnbanPayment.init();
         const ip = clientIp(req);

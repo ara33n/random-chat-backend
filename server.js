@@ -344,7 +344,7 @@ io.use(async (socket, next) => {
         const activeBan = await getActiveBan({ ip });
         if (activeBan) {
             const error = new Error('BANNED');
-            error.data = { paymentEligible: true, reason: activeBan.reason, remaining: Math.ceil((activeBan.expiry.getTime() - Date.now()) / 1000) };
+            error.data = { paymentEligible: true, expiresAt: activeBan.expiry.toISOString(), reason: activeBan.reason, remaining: Math.ceil((activeBan.expiry.getTime() - Date.now()) / 1000) };
             return next(error);
         }
         next();
@@ -374,7 +374,7 @@ const bannedIPs = new Map();
 function disconnectBannedIp(ip, ban) {
     for (const socket of io.sockets.sockets.values()) {
         if (socket.data.ip !== ip) continue;
-        socket.emit('banned', { paymentEligible: true, reason: ban.reason, remaining: Math.max(0, Math.ceil((ban.expiry.getTime() - Date.now()) / 1000)) });
+        socket.emit('banned', { paymentEligible: true, expiresAt: ban.expiry.toISOString(), reason: ban.reason, remaining: Math.max(0, Math.ceil((ban.expiry.getTime() - Date.now()) / 1000)) });
         socket.disconnect(true);
     }
 }
@@ -512,6 +512,7 @@ io.on("connection", (socket) => {
         if (isTempBanned(ip)) {
             socket.emit("banned", {
                 reason: "You are banned for inappropriate words.",
+                expiresAt: new Date(bannedIPs.get(ip)).toISOString(),
                 remaining: Math.ceil((bannedIPs.get(ip) - Date.now()) / 1000),
             });
             return;
@@ -540,6 +541,7 @@ io.on("connection", (socket) => {
         if (isTempBanned(ip)) {
             socket.emit("banned", {
                 reason: "You are banned for inappropriate words.",
+                expiresAt: new Date(bannedIPs.get(ip)).toISOString(),
                 remaining: Math.ceil((bannedIPs.get(ip) - Date.now()) / 1000),
             });
             return;
@@ -595,6 +597,7 @@ io.on("connection", (socket) => {
                     socket.emit('banned', {
                         reason: 'You are banned for inappropriate text. Payment is temporarily unavailable.',
                         remaining: Math.max(0, Math.ceil((bannedIPs.get(ip) - Date.now()) / 1000)),
+                        expiresAt: new Date(bannedIPs.get(ip)).toISOString(),
                         paymentEligible: false,
                     });
                     breakPair(socket, 'partner-stopped');
@@ -682,6 +685,7 @@ io.on("connection", (socket) => {
         if (isTempBanned(ip)) {
             socket.emit("banned", {
                 reason: "You are banned for inappropriate words.",
+                expiresAt: new Date(bannedIPs.get(ip)).toISOString(),
                 remaining: Math.ceil((bannedIPs.get(ip) - Date.now()) / 1000),
             });
             return;

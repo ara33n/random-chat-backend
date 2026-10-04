@@ -38,7 +38,7 @@ before(async () => {
   await mongoose.connect(`${mongo.replace(/\/$/, '')}/${database}`, { serverSelectionTimeoutMS: 3000 });
   server = spawn(process.execPath, ['server.js'], {
     env: { ...process.env, MONGO_URI: `${mongo.replace(/\/$/, '')}/${database}`, PORT: `${port}`,
-      FRONTEND_ORIGINS: 'https://loopchatx.chat', TRUST_PROXY: 'true', PADDLE_WEBHOOK_SECRET: 'integration-webhook-secret', ADMIN_USER: 'integration-operator', ADMIN_PASS: 'integration-only-secret', ADMIN_TOKEN: '' }, stdio: 'ignore',
+      FRONTEND_ORIGINS: 'https://loopchatx.chat', TRUST_PROXY: 'true', PADDLE_WEBHOOK_SECRET: 'integration-webhook-secret', PADDLE_API_KEY: '', PADDLE_UNBAN_PRICE_ID: '', ADMIN_USER: 'integration-operator', ADMIN_PASS: 'integration-only-secret', ADMIN_TOKEN: '' }, stdio: 'ignore',
   });
   for (let i = 0; i < 50; i++) {
     try { if ((await fetch(`${url}/health`)).ok) return; } catch {}
@@ -212,6 +212,8 @@ test('repeated text violations create a payable ten-minute ban that survives rec
  const warning=event(b,'warning');a.emit('message','sex');await warning;
  const banned=event(a,'banned');a.emit('message','sex');const result=await banned;
  assert.equal(result.paymentEligible,true);
+ assert.ok(Number.isFinite(Date.parse(result.expiresAt)));
+ assert.ok(Date.parse(result.expiresAt) > Date.now());
  assert.ok(result.remaining >= 598 && result.remaining <= 600);
  const record=await mongoose.connection.collection('bans').findOne({ip:'127.0.0.41',status:'active'});
  assert.ok(record);assert.ok(record.expiry.getTime()-Date.now()>590000);
@@ -219,4 +221,13 @@ test('repeated text violations create a payable ten-minute ban that survives rec
  const rejected=event(again,'connect_error');again.connect();const error=await rejected;
  assert.equal(error.message,'BANNED');assert.equal(error.data.paymentEligible,true);
  [a,b,again].forEach(s=>s.disconnect());
+});
+
+
+test('unconfigured checkout reports missing setting names, not secret values',async()=>{
+ const response=await fetch(url+'/api/paddle/checkout',{method:'POST',headers:{Origin:'https://loopchatx.chat','content-type':'application/json'},body:'{}'});
+ assert.equal(response.status,503);
+ const body=await response.json();
+ assert.deepEqual(body.missing,['PADDLE_API_KEY','PADDLE_UNBAN_PRICE_ID']);
+ assert.ok(!JSON.stringify(body).includes('integration-webhook-secret'));
 });
