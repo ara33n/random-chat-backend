@@ -24,5 +24,26 @@ test('only the exact completed one-time transaction is eligible',()=>{
 test('Paddle readiness identifies missing configuration without returning secrets',()=>{
  assert.deepEqual(missingPaddleSettings({}),['PADDLE_API_KEY','PADDLE_WEBHOOK_SECRET','PADDLE_UNBAN_PRICE_ID']);
  assert.deepEqual(missingPaddleSettings({PADDLE_API_KEY:'private',PADDLE_WEBHOOK_SECRET:'secret',PADDLE_UNBAN_PRICE_ID:'pri_01m429f20x3bj3nr3qkp99f1t0'}),[]);
- assert.deepEqual(missingPaddleSettings({PADDLE_API_KEY:'private',PADDLE_WEBHOOK_SECRET:' ',PADDLE_UNBAN_PRICE_ID:'invalid'}),['PADDLE_WEBHOOK_SECRET','PADDLE_UNBAN_PRICE_ID']);
+ assert.deepEqual(missingPaddleSettings({PADDLE_API_KEY:'private',PADDLE_WEBHOOK_SECRET:' ',PADDLE_UNBAN_PRICE_ID:'invalid'}),['PADDLE_WEBHOOK_SECRET']);
+});
+
+
+test('configuration distinguishes whitespace, absent values, malformed IDs and environments', async()=>{
+ const { paddleSettings, validatePaddleSettings, paddleConfiguration } = await import('../payments/diagnostics.js');
+ const id='pri_01m429f20x3bj3nr3qkp99f1t0';
+ const base={PADDLE_API_KEY:'private',PADDLE_WEBHOOK_SECRET:'secret',PADDLE_UNBAN_PRICE_ID:id};
+ for (const whitespace of ['', ' ', '\n', '\t', '\r\n']) {
+  const env={...base,PADDLE_UNBAN_PRICE_ID:whitespace+id+whitespace,PADDLE_ENVIRONMENT:' sandbox\n'};
+  assert.deepEqual(validatePaddleSettings(env),{missing:[],invalid:[]});
+  assert.equal(paddleSettings(env).priceId,id);
+  const diag=paddleConfiguration(env);
+  assert.equal(diag.hasUnbanPriceId,true);assert.equal(diag.priceIdStartsWithPri,true);assert.equal(diag.priceIdLength,30);
+  assert.equal(diag.priceIdWhitespaceTrimmed,Boolean(whitespace));
+  for(const value of [id,'private','secret'])assert.ok(!JSON.stringify(diag).includes(value));
+ }
+ for(const value of [undefined,'',' \n'])assert.deepEqual(validatePaddleSettings({...base,PADDLE_UNBAN_PRICE_ID:value}),{missing:['PADDLE_UNBAN_PRICE_ID'],invalid:[]});
+ for(const value of ['pri_short',id+'x',id.slice(0,-1),id.toUpperCase(),'pro_'+id.slice(4),'"'+id+'"',id.slice(0,8)+' '+id.slice(8)]) {
+  assert.deepEqual(validatePaddleSettings({...base,PADDLE_UNBAN_PRICE_ID:value}),{missing:[],invalid:['PADDLE_UNBAN_PRICE_ID']});
+ }
+ assert.deepEqual(validatePaddleSettings({...base,PADDLE_ENVIRONMENT:'wrong'}),{missing:[],invalid:['PADDLE_ENVIRONMENT']});
 });

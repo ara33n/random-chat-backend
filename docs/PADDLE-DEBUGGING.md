@@ -62,3 +62,16 @@ Sources:
 - https://developer.paddle.com/sdks/libraries/
 - https://developer.paddle.com/errors/transactions/transaction_default_checkout_url_not_set/
 - https://developer.paddle.com/get-started/quickstart/
+
+## Environment validation correction
+
+Previously `missingPaddleSettings()` tested the raw (untrimmed) price ID against the correct 30-character Paddle format and classified every regex failure as missing. A valid ID surrounded by whitespace therefore returned a misleading missing error. The local reproduction proves this path; the exact Render value is unavailable locally, so whitespace in Render itself is not confirmed.
+
+All Paddle environment reads now use normalized settings: outer whitespace is trimmed, internal characters/quotes are never silently removed, and the same normalized price is used for validation, lookup, transaction creation and persistence. Sandbox remains the default when environment is unset/blank. Invalid nonempty environment names are rejected separately. API keys and webhook secrets are normalized consistently; if a previous ban reference was signed with a whitespace-padded secret, reconnect to obtain a fresh reference after deployment.
+
+- Absent/blank required value: `PADDLE_CONFIGURATION_MISSING`, with names in `missing`.
+- Present but malformed price: `PADDLE_PRICE_ID_INVALID`, with names in `invalid`, never `missing`.
+- Invalid environment name: `PADDLE_ENVIRONMENT_INVALID`.
+- Valid configured price rejected by Paddle: `PADDLE_PRICE_LOOKUP_FAILED` (502), never `missing`.
+
+Safe diagnostics include `hasUnbanPriceId`, `priceIdStartsWithPri`, trimmed `priceIdLength`, `priceIdFormatValid` and `priceIdWhitespaceTrimmed`. No full price ID or credentials are printed. A valid unpadded price has length 30. These diagnostics distinguish actual whitespace from an incorrect/quoted value or configuration not loaded by the deployed process.

@@ -78,7 +78,7 @@ test('price lookup failure never creates a transaction',async()=>{
  const {ban,request}=setup();const m=mocks(success);m.get.mock.restore();
  const get=mock.method(axios,'get',async()=>{throw {response:{status:403,data:{error:{code:'forbidden'}}}};});
  try {
-  assert.equal((await request()).body.code,'PADDLE_PRICE_LOOKUP_FAILED');assert.equal(m.create.mock.callCount(),0);
+  const response=await request();assert.equal(response.body.code,'PADDLE_PRICE_LOOKUP_FAILED');assert.equal(response.body.missing,undefined);assert.equal(m.create.mock.callCount(),0);
   assert.equal((await UnbanPayment.findOne({banId:ban._id})).status,'failed');
  }finally{get.mock.restore();m.create.mock.restore();m.log.mock.restore();}
 });
@@ -88,4 +88,26 @@ test('logs exclude messages, raw data, tokens, credentials and arbitrary headers
  assert.match(output,/transaction_default_checkout_url_not_set/);assert.match(output,/00000000-/);
  for(const secret of ['test-api-secret','test-webhook-secret','private ban token','Authorization'])assert.ok(!output.includes(secret));
  assert.ok(!JSON.stringify(paddleConfiguration()).includes('test-api-secret'));
+});
+
+test('checkout uses the trimmed ID in lookup, transaction request and database',async()=>{
+ const {ban,request}=setup();const m=mocks(async(url,body)=>{assert.equal(body.items[0].price_id,priceId);return success(url,body);});
+ process.env.PADDLE_UNBAN_PRICE_ID=' \t'+priceId+'\r\n';
+ process.env.PADDLE_ENVIRONMENT=' sandbox\n';
+ try {
+  const response=await request();assert.equal(response.statusCode,200);assert.equal(response.body.priceId,priceId);
+  const payment=await UnbanPayment.findOne({banId:ban._id});assert.equal(payment.priceId,priceId);assert.equal(payment.environment,'sandbox');
+ }finally{process.env.PADDLE_UNBAN_PRICE_ID=priceId;process.env.PADDLE_ENVIRONMENT='sandbox';m.restore();}
+});
+test('missing and malformed configuration have distinct responses without calling Paddle',async()=>{
+ const {request}=setup();const m=mocks(success);
+ try {
+  process.env.PADDLE_UNBAN_PRICE_ID=' \n';
+  const absent=await request();assert.equal(absent.body.code,'PADDLE_CONFIGURATION_MISSING');assert.deepEqual(absent.body.missing,['PADDLE_UNBAN_PRICE_ID']);
+  process.env.PADDLE_UNBAN_PRICE_ID='pri_short';
+  const malformed=await request();assert.equal(malformed.body.code,'PADDLE_PRICE_ID_INVALID');assert.equal(malformed.body.missing,undefined);assert.deepEqual(malformed.body.invalid,['PADDLE_UNBAN_PRICE_ID']);
+  process.env.PADDLE_UNBAN_PRICE_ID=priceId;process.env.PADDLE_ENVIRONMENT='bad';
+  const environment=await request();assert.equal(environment.body.code,'PADDLE_ENVIRONMENT_INVALID');assert.equal(environment.body.missing,undefined);
+  assert.equal(m.get.mock.callCount(),0);assert.equal(m.create.mock.callCount(),0);
+ }finally{process.env.PADDLE_UNBAN_PRICE_ID=priceId;process.env.PADDLE_ENVIRONMENT='sandbox';m.restore();}
 });

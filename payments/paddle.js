@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual, randomUUID } from 'node:crypto';
 import axios from 'axios';
 import mongoose from 'mongoose';
 import { readBanToken } from './ban-token.js';
-import { priceIdValid, paddleEnvironment, paddleOrigin, paddleRequestOptions, logPaddleError } from './diagnostics.js';
+import { paddleSettings, validatePaddleSettings, paddleConfiguration, paddleEnvironment, paddleOrigin, paddleRequestOptions, logPaddleError } from './diagnostics.js';
 
 const schema = new mongoose.Schema({
   orderId: { type: String, unique: true, required: true },
@@ -41,17 +41,18 @@ export function isExpectedTransaction(data, payment) {
 }
 
 export function missingPaddleSettings(env = process.env) {
-  const missing = ['PADDLE_API_KEY', 'PADDLE_WEBHOOK_SECRET'].filter(key => !env[key]?.trim());
-  if (!priceIdValid(env.PADDLE_UNBAN_PRICE_ID)) missing.push('PADDLE_UNBAN_PRICE_ID');
-  if (env.PADDLE_ENVIRONMENT && !['sandbox', 'production'].includes(env.PADDLE_ENVIRONMENT)) missing.push('PADDLE_ENVIRONMENT');
-  return missing;
+  return validatePaddleSettings(env).missing;
 }
 
 export function paddleHandlers({ getBanModel, getActiveBan, clientIp }) {
   return {
     async checkout(req, res) {
-      const missing = missingPaddleSettings();
-      if (missing.length) return res.status(503).json({ error: 'Paddle checkout is not configured yet.', missing });
+      const { missing, invalid } = validatePaddleSettings();
+      if (missing.length || invalid.length) {
+        console.error('[Paddle] configuration invalid', { ...paddleConfiguration(), missing, invalid });
+        if (missing.length) return res.status(503).json({ error: 'Paddle checkout configuration is missing required values.', code: 'PADDLE_CONFIGURATION_MISSING', missing, ...(invalid.length ? { invalid } : {}) });
+        return res.status(503).json({ error: 'Paddle checkout configuration contains an invalid value.', code: invalid.includes('PADDLE_UNBAN_PRICE_ID') ? 'PADDLE_PRICE_ID_INVALID' : 'PADDLE_ENVIRONMENT_INVALID', invalid });
+      }
       let payment;
       let ownsAttempt = false;
       let sentCreate = false;
@@ -69,7 +70,7 @@ export function paddleHandlers({ getBanModel, getActiveBan, clientIp }) {
         }
         if (!ban) return res.status(409).json({ code: 'BAN_NOT_ACTIVE', error: 'This restriction has expired or was removed. Reconnect to chat; no payment is needed for it.' });
         const environment = paddleEnvironment();
-        const priceId = process.env.PADDLE_UNBAN_PRICE_ID;
+        const priceId = paddleSettings().priceId;
         payment = await UnbanPayment.findOne({ banId: ban._id });
         if (!payment) {
           try {
@@ -155,7 +156,7 @@ export function paddleHandlers({ getBanModel, getActiveBan, clientIp }) {
       } catch (error) { logPaddleError(error, 'payment.status'); res.status(503).json({ error: 'Unable to check payment.' }); }
     },
     async webhook(req, res) {
-      if (!verifySignature(req.body, req.headers['paddle-signature'], process.env.PADDLE_WEBHOOK_SECRET)) {
+      if (!verifySignature(req.body, req.headers['paddle-signature'], paddleSettings().webhookSecret)) {
         logPaddleError({}, 'webhook.signature_invalid');
         return res.sendStatus(400);
       }

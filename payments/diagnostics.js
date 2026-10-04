@@ -1,19 +1,42 @@
 export const priceIdValid = value => /^pri_[a-z0-9]{26}$/.test(value || '');
-export function paddleEnvironment() {
-  return process.env.PADDLE_ENVIRONMENT || 'sandbox';
+// Normalize once at every read; never remove internal characters or quotes.
+export function paddleSettings(env = process.env) {
+  return {
+    priceId: env.PADDLE_UNBAN_PRICE_ID?.trim() || '',
+    environment: env.PADDLE_ENVIRONMENT?.trim() || 'sandbox',
+    apiKey: env.PADDLE_API_KEY?.trim() || '',
+    webhookSecret: env.PADDLE_WEBHOOK_SECRET?.trim() || '',
+  };
 }
-export function paddleConfiguration() {
-  const environment = paddleEnvironment();
+export function validatePaddleSettings(env = process.env) {
+  const settings = paddleSettings(env);
+  const missing = [];
+  const invalid = [];
+  if (!settings.apiKey) missing.push('PADDLE_API_KEY');
+  if (!settings.webhookSecret) missing.push('PADDLE_WEBHOOK_SECRET');
+  if (!settings.priceId) missing.push('PADDLE_UNBAN_PRICE_ID');
+  else if (!priceIdValid(settings.priceId)) invalid.push('PADDLE_UNBAN_PRICE_ID');
+  if (!['sandbox', 'production'].includes(settings.environment)) invalid.push('PADDLE_ENVIRONMENT');
+  return { missing, invalid };
+}
+export function paddleEnvironment() {
+  return paddleSettings().environment;
+}
+export function paddleConfiguration(env = process.env) {
+  const { environment, priceId, apiKey, webhookSecret } = paddleSettings(env);
   return {
     environment: ['sandbox', 'production'].includes(environment) ? environment : 'invalid',
-    apiKeyConfigured: Boolean(process.env.PADDLE_API_KEY?.trim()),
-    webhookSecretConfigured: Boolean(process.env.PADDLE_WEBHOOK_SECRET?.trim()),
-    unbanPriceConfigured: Boolean(process.env.PADDLE_UNBAN_PRICE_ID?.trim()),
-    priceIdPrefixValid: priceIdValid(process.env.PADDLE_UNBAN_PRICE_ID),
+    apiKeyConfigured: Boolean(apiKey),
+    webhookSecretConfigured: Boolean(webhookSecret),
+    hasUnbanPriceId: Boolean(priceId),
+    priceIdStartsWithPri: priceId.startsWith('pri_'),
+    priceIdLength: priceId.length,
+    priceIdFormatValid: priceIdValid(priceId),
+    priceIdWhitespaceTrimmed: Boolean(env.PADDLE_UNBAN_PRICE_ID && env.PADDLE_UNBAN_PRICE_ID !== priceId),
   };
 }
 export function paddleRequestOptions() {
-  return { headers: { Authorization: `Bearer ${process.env.PADDLE_API_KEY?.trim()}`, 'Paddle-Version': '1', 'Content-Type': 'application/json' }, timeout: 15000, maxRedirects: 0 };
+  return { headers: { Authorization: `Bearer ${paddleSettings().apiKey}`, 'Paddle-Version': '1', 'Content-Type': 'application/json' }, timeout: 15000, maxRedirects: 0 };
 }
 export function paddleOrigin() {
   const environment = paddleEnvironment();
@@ -24,7 +47,7 @@ export function paddleOrigin() {
 // Provider error codes are identifiers, never raw data or a Mongo duplicate-key message.
 export function safePaddleError(error, operation) {
   const rawCode = error?.response?.data?.error?.code;
-  const secretValues = [process.env.PADDLE_API_KEY, process.env.PADDLE_WEBHOOK_SECRET].filter(Boolean);
+  const secretValues = [process.env.PADDLE_API_KEY, process.env.PADDLE_WEBHOOK_SECRET, paddleSettings().apiKey, paddleSettings().webhookSecret].filter(Boolean);
   const paddleCode = typeof rawCode === 'string' && /^[a-z][a-z0-9_]{1,79}$/.test(rawCode) && !secretValues.some(secret => rawCode.includes(secret)) ? rawCode : undefined;
   const rawRequestId = error?.response?.data?.meta?.request_id || error?.response?.headers?.['request-id'];
   const requestId = typeof rawRequestId === 'string' && /^[a-f0-9-]{36}$/i.test(rawRequestId) && !secretValues.includes(rawRequestId) ? rawRequestId : undefined;
