@@ -55,6 +55,10 @@ after(async () => {
 
 test('health checks MongoDB and polling permits the configured frontend origin', async () => {
   assert.deepEqual(await (await fetch(`${url}/health`)).json(), { ok: true, database: 'connected' });
+  assert.equal((await fetch(`${url}/version`)).status, 404);
+  const preflight = await fetch(`${url}/admin/paddle/price`, {method: 'OPTIONS', headers: {Origin: 'https://loopchatx.chat', 'Access-Control-Request-Method': 'POST', 'Access-Control-Request-Headers': 'content-type,x-admin-user,x-admin-pass'}});
+  assert.equal(preflight.status, 204);
+  assert.equal(preflight.headers.get('access-control-max-age'), '600');
   const response = await fetch(`${url}/socket.io/?EIO=4&transport=polling`, { headers: { Origin: 'https://loopchatx.chat' } });
   assert.equal(response.headers.get('access-control-allow-origin'), 'https://loopchatx.chat');
   assert.match(await response.text(), /^0/);

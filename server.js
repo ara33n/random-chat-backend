@@ -36,7 +36,7 @@ function clientIp(req) {
 }
 // Deliberately fixed: stale hosting environment values cannot allow other websites.
 const allowedOrigins = ['https://loopchatx.chat', 'https://www.loopchatx.chat'];
-const corsOptions = { origin: allowedOrigins, credentials: true, methods: ['GET', 'POST', 'OPTIONS'] };
+const corsOptions = { maxAge: 600, origin: allowedOrigins, credentials: true, methods: ['GET', 'POST', 'OPTIONS'] };
 
 // ---------------- App & DB ----------------
 const app = express();
@@ -126,17 +126,6 @@ async function getActiveBan({ ip, email }) {
     return ban;
 }
 
-// read version
-const pkgPath = path.join(process.cwd(), "package.json");
-let appVersion = "1.0.1";
-try {
-    const raw = fs.readFileSync(pkgPath, "utf-8");
-    const parsed = JSON.parse(raw);
-    appVersion = parsed.version || appVersion;
-} catch {
-    console.warn("⚠️ Could not read package.json version, defaulting to 1.0.1");
-}
-
 app.use("/snapshots", adminAuth, express.static(path.join(process.cwd(), "snapshots")));
 
 // ---------------- Basic routes ----------------
@@ -152,7 +141,6 @@ app.get('/health', async (_req, res) => {
         res.status(503).json({ ok: false, database: 'unavailable' });
     }
 });
-app.get("/version", (req, res) => res.json({ version: appVersion }));
 app.get("/check-outbound-ip", adminAuth, async (_req, res) => {
     try {
         const response = await axios.get("https://ifconfig.me/ip");
@@ -763,7 +751,6 @@ setInterval(async () => {
 
 server.listen(PORT, () => {
     console.log("✅ Signaling server listening on", PORT);
-    console.log("🚀 Current App Version:", appVersion);
 });
 
 // --- Email-based ban/unban for logged-in users ---
