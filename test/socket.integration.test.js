@@ -81,9 +81,6 @@ test('immediate matchmaking, messages, typing and video signaling work across tr
   const delivered = await message;
   assert.equal(delivered.text, 'Hello from the integration test');
   assert.match(delivered.id, /^[a-z0-9-]{8,80}$/i);
-  const reaction = event(a, 'message-reaction');
-  b.emit('message-reaction', {messageId:delivered.id,emoji:'❤️',active:true});
-  assert.deepEqual(await reaction,{messageId:delivered.id,emoji:'❤️',active:true});
   const typing = event(a, 'typing'); b.emit('typing'); await typing;
   const stopped = event(a, 'self-stopped'); a.emit('stop'); await stopped;
   const video = await pair(a, b, 'video'); assert.equal(video[0].mode, 'video');

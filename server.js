@@ -589,7 +589,7 @@ io.on("connection", (socket) => {
     socket.use(([event, payload], next) => {
         const payloadLimit = event === 'video-violation' ? 300000 : 24000;
         if (payload !== undefined && JSON.stringify(payload).length > payloadLimit) return;
-        if (!['find-partner','signal','message','message-reaction','report-user','video-violation','typing','stop-typing','skip','stop'].includes(event)) return;
+        if (!['find-partner','signal','message','report-user','video-violation','typing','stop-typing','skip','stop'].includes(event)) return;
         const now = Date.now();
         const limit = ['report-user', 'video-violation'].includes(event) ? 6 : event === 'signal' ? 100 : 30;
         let entry = rates.get(event);
@@ -744,14 +744,6 @@ io.on("connection", (socket) => {
         } catch (e) {
             console.error("Message save error:", e);
         }
-    });
-
-    socket.on('message-reaction', data => {
-        const partner = safePartner(socket.id);
-        const messageId = typeof data?.messageId === 'string' ? data.messageId : '';
-        const emoji = typeof data?.emoji === 'string' ? data.emoji : '';
-        if (!partner || !/^[a-z0-9_-]{8,80}$/i.test(messageId) || !['❤️','😂','😮','😢','👍'].includes(emoji)) return;
-        partner.emit('message-reaction', { messageId, emoji, active: data?.active === true });
     });
 
     socket.on('video-violation', async (data) => {
