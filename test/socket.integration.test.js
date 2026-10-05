@@ -209,7 +209,7 @@ test('only the apex and www production browser origins are accepted for HTTP and
 
 });
 
-test('repeated text violations create a payable ten-minute ban that survives reconnect', async()=>{
+test('repeated text violations create a payable one-day ban that survives reconnect', async()=>{
  const a=client(),b=client();
  a.io.opts.extraHeaders['x-forwarded-for']='127.0.0.41';
  b.io.opts.extraHeaders['x-forwarded-for']='127.0.0.42';
@@ -219,9 +219,9 @@ test('repeated text violations create a payable ten-minute ban that survives rec
  assert.equal(result.paymentEligible,true);
  assert.ok(Number.isFinite(Date.parse(result.expiresAt)));
  assert.ok(Date.parse(result.expiresAt) > Date.now());
- assert.ok(result.remaining >= 598 && result.remaining <= 600);
+ assert.ok(result.remaining >= 86398 && result.remaining <= 86400);
  const record=await mongoose.connection.collection('bans').findOne({ip:'127.0.0.41',status:'active'});
- assert.ok(record);assert.ok(record.expiry.getTime()-Date.now()>590000);
+ assert.ok(record);assert.ok(record.expiry.getTime()-Date.now()>86390000);
  const again=client();again.io.opts.extraHeaders['x-forwarded-for']='127.0.0.41';
  const rejected=event(again,'connect_error');again.connect();const error=await rejected;
  assert.equal(error.message,'BANNED');assert.equal(error.data.paymentEligible,true);
@@ -246,8 +246,8 @@ test('an explicit under-18 declaration causes an immediate ineligible age restri
  let warned=false;a.on('bad-word-warning',()=>{warned=true;});
  const banned=event(a,'banned');a.emit('message',"I'm 16 years old");const result=await banned;
  assert.equal(warned,false);assert.equal(result.paymentEligible,false);
- assert.match(result.reason,/18 or older/);assert.ok(result.remaining > 31_000_000);
- const record=await mongoose.connection.collection('bans').findOne({ip:'127.0.0.51',source:'age',status:'active'});
+ assert.match(result.reason,/18 or older/);assert.ok(result.remaining > 86_390);
+ const record=await mongoose.connection.collection('bans').findOne({ip:'127.0.0.51',source:'moderation',status:'active'});
  assert.ok(record);assert.equal(record.reactivationEligible,false);
  [a,b].forEach(s=>s.disconnect());
 });
@@ -260,9 +260,31 @@ test('a short under-18 number is banned when it answers a recent age question', 
  const question=event(minor,'message');asker.emit('message','age?');assert.equal(await question,'age?');
  const banned=event(minor,'banned');minor.emit('message','17');const result=await banned;
  assert.equal(result.paymentEligible,false);assert.match(result.reason,/18 or older/);
- const record=await mongoose.connection.collection('bans').findOne({ip:'127.0.0.54',source:'age',status:'active'});
+ const record=await mongoose.connection.collection('bans').findOne({ip:'127.0.0.54',source:'moderation',status:'active'});
  assert.ok(record);
  [asker,minor].forEach(s=>s.disconnect());
+});
+
+test('video violations ban the current partner and preserve nine appeal evidence frames for admins', async()=>{
+ const viewer=client(),accused=client();
+ viewer.io.opts.extraHeaders['x-forwarded-for']='127.0.0.61';
+ accused.io.opts.extraHeaders['x-forwarded-for']='127.0.0.62';
+ await Promise.all([connect(viewer),connect(accused)]);
+ const [viewerMatch]=await pair(viewer,accused,'video');
+ const frame='data:image/jpeg;base64,/9j/2Q==';
+ const banned=event(accused,'banned');
+ viewer.emit('video-violation',{accusedSocketId:viewerMatch.partnerId,before:Array(4).fill(frame),trigger:frame,after:Array(4).fill(frame)});
+ const result=await banned;
+ assert.equal(result.paymentEligible,false);assert.match(result.reason,/Explicit video content/);
+ assert.equal(result.snapshot,frame);assert.equal(typeof result.appealToken,'string');
+ const appeal=await fetch(url+'/api/ban-appeal',{method:'POST',headers:{Origin:'https://loopchatx.chat','content-type':'application/json'},body:JSON.stringify({appealToken:result.appealToken,reason:'Please review the captured video context.'})});
+ assert.equal(appeal.status,200);
+ const response=await fetch(url+'/admin/bans?activeOnly=false',{headers:{'x-admin-user':'integration-operator','x-admin-pass':'integration-only-secret'}});
+ assert.equal(response.status,200);
+ const records=await response.json();const record=records.find(item=>item.ip==='127.0.0.62');
+ assert.equal(record.appealStatus,'pending');assert.equal(record.evidenceFrames.length,9);
+ assert.deepEqual(record.evidenceFrames,Array(9).fill(frame));
+ [viewer,accused].forEach(s=>s.disconnect());
 });
 
 

@@ -1,5 +1,5 @@
 export const BAN_RESET_MS = 30 * 24 * 60 * 60 * 1000;
-export const BAN_DURATIONS_MS = [10 * 60 * 1000, 24 * 60 * 60 * 1000, 7 * 24 * 60 * 60 * 1000];
+export const BAN_DURATIONS_MS = [24 * 60 * 60 * 1000, 24 * 60 * 60 * 1000, 7 * 24 * 60 * 60 * 1000];
 
 export function nextBanPolicy(lastBan, now = Date.now()) {
   const lastCreated = new Date(lastBan?.createdAt || 0).getTime();

@@ -15,7 +15,7 @@ import path from "path";
 import filter from "leo-profanity";
 import mongoose from "mongoose";
 import { randomUUID } from "node:crypto";
-import { BAN_RESET_MS, nextBanPolicy } from "./moderation/ban-policy.js";
+import { BAN_DURATIONS_MS, BAN_RESET_MS, nextBanPolicy } from "./moderation/ban-policy.js";
 import { asksForAge, declaredUnderage, underageShortAnswer } from "./moderation/age-policy.js";
 
 // === Existing models ===
@@ -97,6 +97,7 @@ const banSchema = new mongoose.Schema({
     reason: { type: String, required: true },
     expiry: { type: Date, required: true },
     snapshotBase64: { type: String },
+    evidenceFrames: { type: [String], select: false, default: undefined },
     paymentRequired: { type: Boolean, default: false },
     paymentStatus: { type: String, default: "pending" }, // pending, success, cancelled
     status: { type: String, enum: ["active", "closed"], default: "active" },
@@ -130,29 +131,16 @@ async function createModerationBan(ip, reason, reactivationEligible = false) {
 }
 
 function createAgeRestriction(ip) {
-    return Ban.create({
-        ip,
-        reason: 'LoopChatX is only available to people aged 18 or older.',
-        expiry: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
-        status: 'active',
-        source: 'age',
-        reactivationEligible: false,
-        appealToken: randomUUID(),
-    });
+    return createModerationBan(ip, 'Age requirement violation: LoopChatX is only available to people aged 18 or older.', false);
 }
 
 function publicBanData(ban) {
-    const nextDuration = ban.source === 'moderation'
-        ? nextBanPolicy(ban, new Date(ban.createdAt).getTime() + 1).durationMs
-        : 0;
     return {
         paymentEligible: ban.reactivationEligible === true,
         ...(ban.reactivationEligible === true ? { banToken: createBanToken(ban) } : {}),
         appealToken: ban.appealToken,
         appealStatus: ban.appealStatus || "none",
-        banLevel: ban.banLevel || 1,
-        ...(nextDuration ? { nextBanDurationSeconds: Math.round(nextDuration / 1000) } : {}),
-        escalationResetAt: ban.escalationResetAt?.toISOString?.(),
+        ...(ban.snapshotBase64 ? { snapshot: ban.snapshotBase64 } : {}),
         expiresAt: ban.expiry.toISOString(), reason: ban.reason,
         remaining: Math.max(0, Math.ceil((ban.expiry.getTime() - Date.now()) / 1000)),
     };
@@ -407,8 +395,12 @@ app.get("/admin/bans", adminAuth, async (req, res) => {
     try {
         const activeOnly = String(req.query.activeOnly || "true") === "true";
         const q = activeOnly ? { status: "active", expiry: { $gt: new Date() } } : {};
-        const bans = await Ban.find(q).sort({ createdAt: -1 }).limit(500);
-        res.json(bans);
+        const bans = await Ban.find(q).select('+evidenceFrames').sort({ createdAt: -1 }).limit(500);
+        res.json(bans.map(ban => {
+            const item = ban.toObject();
+            if (item.appealStatus !== 'pending') delete item.evidenceFrames;
+            return item;
+        }));
     } catch (e) {
         console.error("Admin bans list error:", e);
         res.status(500).json({ error: "Failed to fetch bans" });
@@ -441,7 +433,7 @@ app.post('/admin/ban-appeal', adminAuth, async (req, res) => {
 
 // ---------------- Socket.io ----------------
 const server = http.createServer(app);
-const io = new IOServer(server, { cors: corsOptions, maxHttpBufferSize: 32768,
+const io = new IOServer(server, { cors: corsOptions, maxHttpBufferSize: 350000,
     allowRequest: (req, done) => done(null, allowedOrigins.includes(req.headers.origin))
 });
 
@@ -595,10 +587,11 @@ io.on("connection", (socket) => {
     const ip = socket.data.ip;
     const rates = new Map();
     socket.use(([event, payload], next) => {
-        if (payload !== undefined && JSON.stringify(payload).length > 24000) return;
-        if (!['find-partner','signal','message','report-user','typing','stop-typing','skip','stop'].includes(event)) return;
+        const payloadLimit = event === 'video-violation' ? 300000 : 24000;
+        if (payload !== undefined && JSON.stringify(payload).length > payloadLimit) return;
+        if (!['find-partner','signal','message','report-user','video-violation','typing','stop-typing','skip','stop'].includes(event)) return;
         const now = Date.now();
-        const limit = event === 'report-user' ? 6 : event === 'signal' ? 100 : 30;
+        const limit = ['report-user', 'video-violation'].includes(event) ? 6 : event === 'signal' ? 100 : 30;
         let entry = rates.get(event);
         if (!entry || entry.until < now) { entry = { count: 0, until: now + 10000 }; rates.set(event, entry); }
         if (++entry.count > limit) { socket.emit('rate-limit', { message: 'Please slow down and try again shortly.' }); return; }
@@ -680,7 +673,7 @@ io.on("connection", (socket) => {
             const count = (badWordCount.get(ip) || 0) + 1;
             badWordCount.set(ip, count);
             // Block additional messages while the persistent ban is being saved.
-            if (count >= 2) bannedIPs.set(ip, Date.now() + 10 * 60 * 1000);
+            if (count >= 2) bannedIPs.set(ip, Date.now() + BAN_DURATIONS_MS[0]);
             socket.emit("bad-word-warning", { text: msg, strikes: count });
             partner.emit("message", msg);
             partner.emit("warning", {
@@ -738,6 +731,30 @@ io.on("connection", (socket) => {
             }).save();
         } catch (e) {
             console.error("Message save error:", e);
+        }
+    });
+
+    socket.on('video-violation', async (data) => {
+        try {
+            const partner = safePartner(socket.id);
+            const accusedSocketId = typeof data?.accusedSocketId === 'string' ? data.accusedSocketId : '';
+            if (!partner || partner.id !== accusedSocketId || modeOf.get(socket.id) !== 'video') return;
+            if (socket.data.videoViolationPartnerId === accusedSocketId) return;
+            const before = Array.isArray(data?.before) ? data.before : [];
+            const after = Array.isArray(data?.after) ? data.after : [];
+            const trigger = typeof data?.trigger === 'string' ? data.trigger : '';
+            const validFrame = frame => typeof frame === 'string' && /^data:image\/jpeg;base64,[a-z0-9+/=]+$/i.test(frame) && frame.length <= 30000;
+            if (before.length !== 4 || after.length !== 4 || !validFrame(trigger) || !before.every(validFrame) || !after.every(validFrame)) return;
+            socket.data.videoViolationPartnerId = accusedSocketId;
+            const ban = await createModerationBan(partner.data.ip, 'Explicit video content detected during a video chat.', false);
+            ban.snapshotBase64 = trigger;
+            ban.evidenceFrames = [...before, trigger, ...after];
+            await ban.save();
+            disconnectBannedIp(partner.data.ip, ban);
+            socket.emit('video-violation-recorded');
+        } catch (error) {
+            console.error('Video violation handling failed:', error.name);
+            socket.emit('server-error', { error: 'Unable to save the video moderation evidence.' });
         }
     });
 
