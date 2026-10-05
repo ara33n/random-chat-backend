@@ -3,7 +3,9 @@ import mongoose from "mongoose";
 const MessageSchema = new mongoose.Schema(
     {
         roomId: { type: String, index: true },
+        messageId: String,
         text: String,
+        replyTo: { id: String, text: String, author: String },
         senderIp: String,
         receiverIp: String,
         senderSocketId: String,

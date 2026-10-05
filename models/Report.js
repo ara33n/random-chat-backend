@@ -9,6 +9,8 @@ const reportSchema = new mongoose.Schema({
   messages: [
     {
       text: String,
+      messageId: String,
+      replyTo: { id: String, text: String, author: String },
       senderIp: String,
       receiverIp: String,
       senderSocketId: String,

@@ -589,7 +589,7 @@ io.on("connection", (socket) => {
     socket.use(([event, payload], next) => {
         const payloadLimit = event === 'video-violation' ? 300000 : 24000;
         if (payload !== undefined && JSON.stringify(payload).length > payloadLimit) return;
-        if (!['find-partner','signal','message','report-user','video-violation','typing','stop-typing','skip','stop'].includes(event)) return;
+        if (!['find-partner','signal','message','message-reaction','report-user','video-violation','typing','stop-typing','skip','stop'].includes(event)) return;
         const now = Date.now();
         const limit = ['report-user', 'video-violation'].includes(event) ? 6 : event === 'signal' ? 100 : 30;
         let entry = rates.get(event);
@@ -633,8 +633,16 @@ io.on("connection", (socket) => {
         if (partner) partner.emit("signal", payload);
     });
 
-    socket.on("message", async (msg) => {
+    socket.on("message", async (incoming) => {
+        const msg = typeof incoming === 'string' ? incoming : incoming?.text;
         if (typeof msg !== "string" || !msg.trim() || msg.length > 4000) return;
+        const suppliedId = typeof incoming?.id === 'string' ? incoming.id : '';
+        const messageId = /^[a-z0-9_-]{8,80}$/i.test(suppliedId) ? suppliedId : randomUUID();
+        const candidateReply = incoming && typeof incoming === 'object' ? incoming.replyTo : null;
+        const replyTo = candidateReply && /^[a-z0-9_-]{8,80}$/i.test(candidateReply.id) && typeof candidateReply.text === 'string'
+            ? { id: candidateReply.id, text: candidateReply.text.trim().slice(0, 240), author: candidateReply.author === 'recipient' ? 'recipient' : 'sender' }
+            : undefined;
+        const outgoing = { id: messageId, text: msg, ...(replyTo ? { replyTo } : {}) };
         if (isTempBanned(ip)) {
             socket.emit("banned", {
                 reason: "You are banned for inappropriate words.",
@@ -675,7 +683,7 @@ io.on("connection", (socket) => {
             // Block additional messages while the persistent ban is being saved.
             if (count >= 2) bannedIPs.set(ip, Date.now() + BAN_DURATIONS_MS[0]);
             socket.emit("bad-word-warning", { text: msg, strikes: count });
-            partner.emit("message", msg);
+            partner.emit("message", outgoing);
             partner.emit("warning", {
                 text: msg,
                 from: "partner",
@@ -685,7 +693,9 @@ io.on("connection", (socket) => {
             try {
                 await new Message({
                     roomId,
+                    messageId,
                     text: msg,
+                    replyTo,
                     senderIp: ip,
                     receiverIp: partnerIp,
                     senderSocketId: socket.id,
@@ -718,11 +728,13 @@ io.on("connection", (socket) => {
             return;
         }
 
-        partner.emit("message", msg);
+        partner.emit("message", outgoing);
         try {
             await new Message({
                 roomId,
+                messageId,
                 text: msg,
+                replyTo,
                 senderIp: ip,
                 receiverIp: partnerIp,
                 senderSocketId: socket.id,
@@ -732,6 +744,14 @@ io.on("connection", (socket) => {
         } catch (e) {
             console.error("Message save error:", e);
         }
+    });
+
+    socket.on('message-reaction', data => {
+        const partner = safePartner(socket.id);
+        const messageId = typeof data?.messageId === 'string' ? data.messageId : '';
+        const emoji = typeof data?.emoji === 'string' ? data.emoji : '';
+        if (!partner || !/^[a-z0-9_-]{8,80}$/i.test(messageId) || !['❤️','😂','😮','😢','👍'].includes(emoji)) return;
+        partner.emit('message-reaction', { messageId, emoji, active: data?.active === true });
     });
 
     socket.on('video-violation', async (data) => {

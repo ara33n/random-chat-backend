@@ -78,7 +78,12 @@ test('immediate matchmaking, messages, typing and video signaling work across tr
   assert.equal(second.partnerId, a.id);
   assert.deepEqual(first.matchedTopics, ['music']);
   const message = event(b, 'message'); a.emit('message', 'Hello from the integration test');
-  assert.equal(await message, 'Hello from the integration test');
+  const delivered = await message;
+  assert.equal(delivered.text, 'Hello from the integration test');
+  assert.match(delivered.id, /^[a-z0-9-]{8,80}$/i);
+  const reaction = event(a, 'message-reaction');
+  b.emit('message-reaction', {messageId:delivered.id,emoji:'❤️',active:true});
+  assert.deepEqual(await reaction,{messageId:delivered.id,emoji:'❤️',active:true});
   const typing = event(a, 'typing'); b.emit('typing'); await typing;
   const stopped = event(a, 'self-stopped'); a.emit('stop'); await stopped;
   const video = await pair(a, b, 'video'); assert.equal(video[0].mode, 'video');
@@ -257,7 +262,7 @@ test('a short under-18 number is banned when it answers a recent age question', 
  asker.io.opts.extraHeaders['x-forwarded-for']='127.0.0.53';
  minor.io.opts.extraHeaders['x-forwarded-for']='127.0.0.54';
  await Promise.all([connect(asker),connect(minor)]);await pair(asker,minor);
- const question=event(minor,'message');asker.emit('message','age?');assert.equal(await question,'age?');
+ const question=event(minor,'message');asker.emit('message','age?');assert.equal((await question).text,'age?');
  const banned=event(minor,'banned');minor.emit('message','17');const result=await banned;
  assert.equal(result.paymentEligible,false);assert.match(result.reason,/18 or older/);
  const record=await mongoose.connection.collection('bans').findOne({ip:'127.0.0.54',source:'moderation',status:'active'});
