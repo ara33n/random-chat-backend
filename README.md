@@ -15,7 +15,7 @@ npm run start
 Use Node.js 24 LTS (pinned in `.node-version` and `package.json`). Local `.env` configuration is loaded automatically; host-provided values take precedence.
 
 - `MONGO_URI`: MongoDB connection string, supplied through the host's environment settings.
-- Browser origins are fixed to `https://loopchatx.chat` and `https://www.loopchatx.chat` for HTTP and Socket.IO. Other origins (including localhost and preview deployments) are rejected. `FRONTEND_ORIGINS` no longer changes this allowlist. No-Origin HTTP requests remain available for Render health checks and signed Paddle webhooks; sockets require the exact Origin. Origin filtering is not authentication against non-browser clients.
+- Browser origins are fixed to `https://loopchatx.chat`, `https://www.loopchatx.chat`, and local development at `http://localhost:4200` for HTTP and Socket.IO. Other origins, including preview deployments, are rejected. `FRONTEND_ORIGINS` no longer changes this allowlist. No-Origin HTTP requests remain available for Render health checks and signed Paddle webhooks; sockets require an allowed Origin. Origin filtering is not authentication against non-browser clients.
 - `PORT`: supplied by Render (defaults to 3001 locally).
 
 Configure the Render health-check path as `/health`. This returns HTTP 200 only when a database ping succeeds, and HTTP 503 otherwise. `/` is only a basic HTTP liveness check and cannot confirm database readiness.

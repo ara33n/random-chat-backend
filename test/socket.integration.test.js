@@ -187,8 +187,8 @@ test('signed Paddle fulfillment closes only its paid ban and is idempotent', asy
 });
 
 
-test('only the apex and www production browser origins are accepted for HTTP and WebSocket', async()=>{
- for (const origin of ['https://loop-chatx.vercel.app','http://localhost:4200','https://loopchatx.chat.evil.example','null']) {
+test('only configured production and localhost browser origins are accepted for HTTP and WebSocket', async()=>{
+ for (const origin of ['https://loop-chatx.vercel.app','https://loopchatx.chat.evil.example','null']) {
    const response=await fetch(url+'/health',{headers:{Origin:origin}});
    assert.equal(response.status,403,origin);
    const socket=io(url,{autoConnect:false,reconnection:false,transports:['websocket'],extraHeaders:{Origin:origin}});clients.push(socket);
@@ -196,7 +196,7 @@ test('only the apex and www production browser origins are accepted for HTTP and
  }
  const socket=io(url,{autoConnect:false,reconnection:false,transports:['websocket']});clients.push(socket);
  const rejected=event(socket,'connect_error');socket.connect();await rejected;socket.disconnect();
- for (const origin of ['https://loopchatx.chat', 'https://www.loopchatx.chat']) {
+ for (const origin of ['https://loopchatx.chat', 'https://www.loopchatx.chat', 'http://localhost:4200']) {
    const response = await fetch(url+'/health',{headers:{Origin:origin}});
    assert.equal(response.status,200);
    assert.equal(response.headers.get('access-control-allow-origin'),origin);

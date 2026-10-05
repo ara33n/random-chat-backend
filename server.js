@@ -38,7 +38,7 @@ function clientIp(req) {
     return direct;
 }
 // Deliberately fixed: stale hosting environment values cannot allow other websites.
-const allowedOrigins = ['https://loopchatx.chat', 'https://www.loopchatx.chat'];
+const allowedOrigins = ['https://loopchatx.chat', 'https://www.loopchatx.chat', 'http://localhost:4200'];
 const corsOptions = { maxAge: 600, origin: allowedOrigins, credentials: true, methods: ['GET', 'POST', 'OPTIONS'] };
 
 // ---------------- App & DB ----------------
